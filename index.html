@@ -4,6 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>ARISE — Hunter Training System</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#050a12">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ARISE">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" href="icons/icon-192.png">
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Barlow+Condensed:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -571,6 +579,7 @@ body{
           <button class="btn btn-sm btn-danger" data-a="demo_week" style="grid-column:1/-1">⚡ SIMULATE WEEK END</button>
           <button class="btn btn-sm btn-gold" data-a="demo_startGate" style="grid-column:1/-1">⚔ START DEMO GATE (500 HP)</button>
           <button class="btn btn-sm btn-danger" data-a="demo_clearAllInventories" style="grid-column:1/-1">🗑 ONE-TIME: CLEAR ALL INVENTORIES (this device)</button>
+          <button class="btn btn-sm" data-a="sendTestPush" style="grid-column:1/-1">🔔 SEND TEST PUSH</button>
           <button class="btn btn-sm btn-danger" data-a="resetAll" style="grid-column:1/-1">🔄 RESET PROFILE</button>
         </div>
       </div>
@@ -754,6 +763,12 @@ body{
       </select>
     </div>
     <button class="btn btn-green" style="width:100%;margin-top:8px" data-a="saveSettings">SAVE SETTINGS</button>
+    <div class="divider" style="margin-top:16px"></div>
+    <div class="form-group">
+      <label class="form-label">Notiser</label>
+      <button class="btn btn-sm" style="width:100%" data-a="enablePush">🔔 ENABLE NOTIFICATIONS</button>
+      <div id="push-status-line" style="font-size:11px;color:var(--dim);text-align:center;margin-top:6px"></div>
+    </div>
     <div class="divider" style="margin-top:16px"></div>
     <div style="font-size:11px;color:var(--dim);text-align:center;margin-top:10px">
       <button class="btn btn-sm btn-danger" data-a="resetAll">RESET ALL DATA</button>
@@ -2988,6 +3003,7 @@ function openSettings() {
   document.getElementById('set-goal').value = state.goal;
   document.getElementById('set-split').value = state.split;
   document.getElementById('settings-modal').classList.add('show');
+  renderSettingsPushStatus();
 }
 
 function saveSettings() {
@@ -3049,6 +3065,8 @@ document.addEventListener('click', function(e) {
   else if(a === 'closeSettings') closeSettings();
   else if(a === 'saveSettings') saveSettings();
   else if(a === 'resetAll')    { if(confirm('Reset all data?')) { const k = profileStateKey(); if(k) localStorage.removeItem(k); state = defaultState(); saveState(); renderAll(); } }
+  else if(a === 'enablePush')  enablePushNotifications();
+  else if(a === 'sendTestPush') sendTestPush();
 
   else if(a === 'switchProfile') { if(confirm('Byt profil? Du loggas ut från '+esc(state.name)+'.')) { localStorage.removeItem('arise_active_profile'); location.reload(); } }
   else if(a === 'gateNewSlot') gateNewSlot();
@@ -3724,6 +3742,115 @@ const SUPABASE_URL = 'https://tdzdeljxuhghrfobtbti.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRkemRlbGp4dWhnaHJmb2J0YnRpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU5OTY1NzQsImV4cCI6MjEwMTU3MjU3NH0.WMH6cV3gskppDU0FIVXMCzkOAOUUcWduxn8FpxHievI';
 const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// ============================================================
+//  PUSH NOTIFICATIONS — plumbing only (no trigger logic, see Brief B)
+// ============================================================
+// Public VAPID key — safe to expose client-side by design.
+const VAPID_PUBLIC_KEY = 'BLuiXv94hAv5ElaQQxkGNvXXTwZRnyWUgSC3AF-u_8QhAQlgUxIDi-_bRYtaYPHz7s5_eVd11z1d0bTuLmU4sxw';
+
+let swRegistration = null;
+
+async function registerServiceWorker() {
+  if(!('serviceWorker' in navigator)) return null;
+  try {
+    swRegistration = await navigator.serviceWorker.register('sw.js');
+    return swRegistration;
+  } catch(e) {
+    console.warn('Service worker registration failed', e);
+    return null;
+  }
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for(let i = 0; i < rawData.length; i++) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
+}
+
+function pushSupported() {
+  return ('serviceWorker' in navigator) && ('PushManager' in window) && ('Notification' in window);
+}
+
+async function pushSubscriptionStatus() {
+  if(!pushSupported()) return 'unsupported';
+  if(Notification.permission === 'denied') return 'denied';
+  const reg = swRegistration || await registerServiceWorker();
+  if(!reg) return 'unsupported';
+  const sub = await reg.pushManager.getSubscription();
+  return sub ? 'subscribed' : 'unsubscribed';
+}
+
+async function enablePushNotifications() {
+  if(!pushSupported()) { showToast('Push stöds inte i den här webbläsaren.'); return; }
+  try {
+    const reg = swRegistration || await registerServiceWorker();
+    if(!reg) { showToast('Kunde inte registrera service worker.'); return; }
+
+    const permission = await Notification.requestPermission();
+    if(permission !== 'granted') {
+      showToast('Notiser nekades — kan aktiveras senare i webbläsarens inställningar.');
+      return;
+    }
+
+    let sub = await reg.pushManager.getSubscription();
+    if(!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+      });
+    }
+
+    const pid = activeProfileId();
+    if(!pid) return;
+    const json = sub.toJSON();
+
+    const {error} = await supa.from('push_subscriptions').upsert({
+      profile_id: pid,
+      endpoint: json.endpoint,
+      keys_p256dh: json.keys.p256dh,
+      keys_auth: json.keys.auth
+    }, {onConflict: 'endpoint'});
+
+    if(error) { console.error(error); showToast('Kunde inte spara notis-prenumeration.'); return; }
+    showToast('✓ Notiser aktiverade');
+    if(document.getElementById('settings-modal')?.classList.contains('show')) renderSettingsPushStatus();
+  } catch(e) {
+    console.error(e);
+    showToast('Något gick fel vid aktivering av notiser.');
+  }
+}
+
+async function sendTestPush() {
+  const pid = activeProfileId();
+  if(!pid) return;
+  try {
+    const {error} = await supa.functions.invoke('send-push', {
+      body: {profile_id: pid, title: 'ARISE — Test', body: 'Testnotis från Demo Tools.', tag: 'demo-test'}
+    });
+    if(error) throw error;
+    showToast('Testnotis skickad — kolla telefonen.');
+  } catch(e) {
+    console.error(e);
+    showToast('Kunde inte skicka testnotis.');
+  }
+}
+
+async function renderSettingsPushStatus() {
+  const el = document.getElementById('push-status-line');
+  if(!el) return;
+  const status = await pushSupported() ? await pushSubscriptionStatus() : 'unsupported';
+  const map = {
+    unsupported: 'Stöds ej i denna webbläsare',
+    denied: 'Nekad — ändra i webbläsarinställningarna',
+    unsubscribed: 'Ej aktiverad',
+    subscribed: '✓ Aktiverad på den här enheten'
+  };
+  el.textContent = map[status] || '';
+}
+
 let gate = {
   profiles: [], view: 'select', profile: null,
   pinBuf: '', pin1: '', setpinStage: 'enter', isNewProfile: false,
@@ -4246,6 +4373,7 @@ function bootApp() {
   loadActiveSession();
   renderAll();
   updateSessionPill();
+  registerServiceWorker();
   // Gate-state hämtas från Supabase efter att UI:t bootats med lokal spegel
   syncLoadActiveGate().then(function(){
     checkGateExpiry();

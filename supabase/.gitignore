@@ -1,0 +1,4 @@
+# Supabase CLI local state — regenerated automatically, not meant for git
+.branches
+.temp
+.env
