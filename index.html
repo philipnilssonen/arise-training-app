@@ -1118,6 +1118,7 @@ function saveState() {
   const key = profileStateKey();
   if(!key) return;
   try { localStorage.setItem(key, JSON.stringify(state)); } catch(e){}
+  syncNotifState(); // debounced spegel till notification_state (Brief B)
 }
 
 // ============================================================
@@ -1200,6 +1201,7 @@ function processLevels() {
   if(state.rankUpPending) return; // wait for rank-up form
   const startLevel = state.level;
   let pointsGained = 0;
+  let justRankPending = false;
   while(true) {
     const needed = xpForLevel(state.rank, state.level);
     if(state.xp >= needed) {
@@ -1212,14 +1214,18 @@ function processLevels() {
         // Level 20 complete — show rank-up banner
         state.rankUpPending = true;
         state.xp = 0; // cap at 0 until ranked up
+        justRankPending = true;
         break;
       }
     } else break;
   }
   if(pointsGained > 0) {
+    state.lastSkillPointTS = Date.now(); // L3-underlag (oanvänt skill point 3+ dagar)
     notifQueue.push({rank:state.rank, fromLevel:startLevel, toLevel:state.level, points:pointsGained});
     if(!notifShowing) showNextNotif();
+    maybePushLevelUp();
   }
+  if(justRankPending) maybePushRankUp(RANKS[Math.min(state.rank + 1, 5)]);
 }
 
 function showNextNotif() {
@@ -2669,6 +2675,7 @@ function simulateWeekEnd() {
   if(perfectWeek) {
     if(hasPassive('sovereigns_will')) { state.sovereignCritsLeft = 2; }
     else                              { state.critPending = true; }
+    maybePushT3(); // veckomål uppnått — deduplicerad per ISO-vecka
   }
 
   // --- PASSIVE: shadow_strike — +200 XP if perfect gym week ---
@@ -3456,6 +3463,7 @@ function startSession(workoutIdx) {
   const workout = getWorkoutForIdx(workoutIdx);
   activeSession = {date:todayISO(), workoutIdx:workoutIdx, workoutName:workout.name, warmupDone:false, completedExercises:[], completed:false};
   saveActiveSession();
+  pushActiveSessionNotif(); // T2: fire-and-forget, rör ingen rendering
   openSessionModal();
   updateSessionPill();
   renderPlan();
@@ -3486,6 +3494,7 @@ function finishSession() {
   saveActiveSession();
   const wIdx = activeSession.workoutIdx ?? 0;
   doLogGym(wIdx, todayISO());
+  closeActiveSessionNotif(); // T2: stänger notisen på alla enheter, fire-and-forget
   document.getElementById('session-modal').classList.remove('show');
   updateSessionPill();
   renderPlan();
@@ -3849,6 +3858,122 @@ async function renderSettingsPushStatus() {
     subscribed: '✓ Aktiverad på den här enheten'
   };
   el.textContent = map[status] || '';
+}
+
+// ============================================================
+//  GAME NOTIFICATIONS (Brief B) — client hooks & state mirror
+// ============================================================
+// Server-side crons (T1/T4/K1/K2/L3/B3/B4) läser en spegel av spelstate ur
+// notification_state — localStorage är fortfarande source of truth, spegeln
+// uppdateras debounced vid varje saveState. B1/B2 är DB-triggers och behöver
+// ingen klientkod. T2/T3/L1/L2 skickas härifrån.
+
+let _notifSyncTimer = null;
+function syncNotifState() {
+  if(!activeProfileId()) return;
+  clearTimeout(_notifSyncTimer);
+  _notifSyncTimer = setTimeout(_pushNotifState, 800);
+}
+
+async function _pushNotifState() {
+  const pid = activeProfileId();
+  if(!pid || !state) return;
+  try {
+    await supa.from('notification_state').upsert({
+      profile_id: pid,
+      schedule: (state.schedule || []).map(function(d){ return d.type; }),
+      days_per_week: state.daysPerWeek || 0,
+      weekly_gym: state.weeklyGym || 0,
+      weekly_cardio: state.weeklyCardio || 0,
+      today_date: todayISO(),
+      today_gym_logged: (state.logs || []).some(function(l){ return l.type === 'gym' && l.date === todayISO(); }),
+      today_nutrition_done: !!(state.nutritionToday && state.nutritionToday.protein && state.nutritionToday.calories && state.nutritionToday.water),
+      skill_points: state.skillPoints || 0,
+      last_skill_point_at: state.lastSkillPointTS ? new Date(state.lastSkillPointTS).toISOString() : null,
+      updated_at: new Date().toISOString()
+    }, {onConflict: 'profile_id'});
+  } catch(e) {}
+}
+
+async function ensureNotifPrefs() {
+  const pid = activeProfileId();
+  if(!pid) return;
+  try {
+    await supa.from('notification_preferences')
+      .upsert({profile_id: pid}, {onConflict: 'profile_id', ignoreDuplicates: true});
+  } catch(e) {}
+}
+
+// Presence: hjärtslag var 60:e sekund medan fliken är synlig. "Appen öppen" =
+// last_seen_at färskare än 2 min — läses av B2-triggern och only_if_absent.
+// Startas EFTER syncLoadActiveGate så att offline-intjänad XP (gate-utfall)
+// hinner processas medan last_seen_at fortfarande är gammal — det är vad som
+// låter L1/L2 skickas för level-ups som "hände medan appen var stängd".
+let _presenceTimer = null;
+function startPresenceHeartbeat() {
+  _sendHeartbeat();
+  clearInterval(_presenceTimer);
+  _presenceTimer = setInterval(function(){ if(!document.hidden) _sendHeartbeat(); }, 60000);
+  document.addEventListener('visibilitychange', function(){ if(!document.hidden) _sendHeartbeat(); });
+}
+
+async function _sendHeartbeat() {
+  const pid = activeProfileId();
+  if(!pid) return;
+  try {
+    await supa.from('notification_state').upsert(
+      {profile_id: pid, last_seen_at: new Date().toISOString()},
+      {onConflict: 'profile_id'}
+    );
+  } catch(e) {}
+}
+
+function _gamePush(payload) {
+  const pid = activeProfileId();
+  if(!pid) return;
+  payload.profile_id = pid;
+  supa.functions.invoke('send-push', {body: payload}).catch(function(){});
+}
+
+// L1 — level-up. Servern skickar bara om ingen enhet varit aktiv senaste 2 min.
+function maybePushLevelUp() {
+  _gamePush({title:'ARISE', body:'You leveled up! Click to assign skill point',
+             tag:'level-up', only_if_absent:true});
+}
+
+// L2 — rank-up. Egen kodpath, större händelse.
+function maybePushRankUp(nextRankName) {
+  _gamePush({title:'ARISE — RANK UP', tag:'rank-up', only_if_absent:true,
+             body:'Congratulations Hunter, you have ranked up to ' + nextRankName + '-rank!'});
+}
+
+// T2 — aktivt pass: visa vid start, stäng (utan ny notis) vid avslut.
+function pushActiveSessionNotif() {
+  _gamePush({title:'ARISE', body:'You have an active session — Click to open session',
+             tag:'active-session-' + activeProfileId()});
+}
+function closeActiveSessionNotif() {
+  _gamePush({title:'ARISE', body:'Session complete',
+             tag:'active-session-' + activeProfileId(), action:'close'});
+}
+
+// T3 — veckomål uppnått. Deduplicerad per ISO-vecka så en extra
+// SIMULATE WEEK END-tryckning inte spammar.
+function maybePushT3() {
+  const wk = _isoWeekKey(new Date());
+  if(state.lastT3WeekSent === wk) return;
+  state.lastT3WeekSent = wk;
+  _gamePush({title:'ARISE — Weekly target reached!', tag:'t3',
+             body:'Good job Hunter ' + state.name + '! You have reached your weekly target, your next boss damage will Crit ⚔️'});
+}
+
+function _isoWeekKey(d) {
+  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dayNum = (t.getUTCDay() + 6) % 7;
+  t.setUTCDate(t.getUTCDate() - dayNum + 3);
+  const firstThursday = new Date(Date.UTC(t.getUTCFullYear(), 0, 4));
+  const week = 1 + Math.round(((t - firstThursday) / 86400000 - 3 + ((firstThursday.getUTCDay() + 6) % 7)) / 7);
+  return t.getUTCFullYear() + '-W' + week;
 }
 
 let gate = {
@@ -4374,10 +4499,15 @@ function bootApp() {
   renderAll();
   updateSessionPill();
   registerServiceWorker();
-  // Gate-state hämtas från Supabase efter att UI:t bootats med lokal spegel
+  ensureNotifPrefs();
+  syncNotifState();
+  // Gate-state hämtas från Supabase efter att UI:t bootats med lokal spegel.
+  // Presence-hjärtslaget startas EFTER gate-synken: offline-intjänad XP ska
+  // processas medan last_seen_at ännu är gammal, annars gate:as L1/L2 bort.
   syncLoadActiveGate().then(function(){
     checkGateExpiry();
     flushPendingGateOps();
+    startPresenceHeartbeat();
   });
 }
 initGate();

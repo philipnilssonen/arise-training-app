@@ -1057,6 +1057,65 @@ tagg-baserad visa/stäng för T2:s öppna/stäng-behov.
 Källkod: `supabase/migrations/0001_push_subscriptions.sql`,
 `supabase/functions/send-push/index.ts`, `supabase/migrations/0002_push_cron_stub.sql`,
 `supabase/PUSH_SETUP.md` (deploy-runbook).
+
+### Notissystem (Brief B) — ✅ IMPLEMENTERAT
+
+Alla 11 notiser från `ARISE_Notiser_Lista.md` är byggda ovanpå Brief A:s infrastruktur.
+Arkitekturen delar upp dem efter var triggern naturligt bor:
+
+| Kategori | Notiser | Mekanism |
+|---|---|---|
+| Tidsbaserade | T1, T4, K1, K2, L3, B3, B4 | Edge Function `notify-cron`, körs var 15:e minut via pg_cron (`arise-notify-cron`) |
+| Event-baserade (server) | B1 (boss-skada), B2 (boss dör) | Postgres-triggers på `gate_damage_events` / `gate_instances` → `arise_push()` → send-push |
+| Event-baserade (klient) | T2 (aktivt pass, öppna+stäng), T3 (veckomål), L1 (level-up), L2 (rank-up) | Hooks i `index.html`: `startSession`/`finishSession`, `simulateWeekEnd`, `processLevels` |
+
+**Nya tabeller:**
+```
+notification_preferences — profile_id, tz, t1/k1/k2/b34/l3-tider, t4_dow+t4_time, enabled, disabled_keys[]
+notification_state       — klient-speglad spelstate: schedule (7 dagtyper, mån först), days_per_week,
+                           weekly_gym/cardio, today_date + today_gym_logged/nutrition_done,
+                           skill_points, last_skill_point_at, last_seen_at (presence)
+notification_log         — dedup: (profile_id, notif_key, sent_on) unik — max 1 per typ och dag
+```
+
+**Klockslag är konfigurerbara per profil** i `notification_preferences` (defaults: T1 08:00,
+K1 12:00, K2 20:00, B3/B4 07:30, L3 17:00, T4 torsdag 18:00, tz Europe/Stockholm).
+Enskilda notistyper kan stängas av per profil via `disabled_keys` (t.ex. `'{b1}'`).
+
+**Presence-modellen:** klienten skickar hjärtslag (`notification_state.last_seen_at`) var 60:e
+sekund medan fliken är synlig. "Appen öppen" = hjärtslag färskare än 2 minuter. Används av
+B2 (skicka bara till frånvarande team-medlemmar) och L1/L2 (via `only_if_absent`-flaggan i
+send-push). Hjärtslaget startas medvetet EFTER `syncLoadActiveGate` i bootApp — så att
+offline-intjänad XP (gate-utfall) processas medan `last_seen_at` ännu är gammal, vilket är
+det som låter L1/L2 skickas för level-ups som hände "medan appen var stängd".
+
+**Känd begränsning (L1/L2 + presence):** eftersom XP idag bara tjänas in av klient-side
+actions kan en level-up i praktiken bara ske medan en enhet är aktiv — L1/L2 skickas därför
+nästan uteslutande i offline-catchup-fallet ovan (gate avslutad medan spelaren var borta).
+Om XP någon gång flyttas server-side blir presence-gaten mer meningsfull utan kodändring.
+
+**Känd risk (T2-stäng på iOS):** `action:'close'`-pushen visar ingen notis, och iOS kan
+strypa prenumerationer som får upprepade "tysta" pushar. Om T2-stängningen slutar fungera
+på iPhone är fallbacken att ersätta close-pushen med en kort "Session complete"-notis med
+samma tagg. Bevakas vid verklig användning.
+
+**B1 är medvetet en egen liten SQL-funktion** (`arise_notify_boss_damage`) — beslutet
+"varje skada" kan bytas till milstolpe-baserat genom att ändra enbart den funktionen.
+
+**Notify-cron-detaljer:** "due" = lokal tid ≥ inställd tid (självläkande om en cron-körning
+missas), profiler utan push-prenumerationer hoppas över helt, K2 skippas om alla tre
+nutrition-checkins redan är gjorda, T1/B3/B4 skippas om dagens gympass redan loggats,
+dedup-rader äldre än 30 dagar städas automatiskt.
+
+**Medvetet uteslutna notiser** (från `ARISE_Notiser_Lista.md`, för framtida referens):
+- **Missad-pass-nudge** — går emot no-forgiveness/no-guilt-designprincipen; T1 + T4 täcker behovet proaktivt
+- **Gate-timeout-varning** — meningslös när bossen har mycket HP kvar; kräver HP-tröskel-logik som inte är värd komplexiteten
+- **Loot-drop-notis** — redundant med B1/B2
+- **Pity-snart-utlöst** — för nischad
+
+Källkod: `supabase/migrations/0003_notification_system.sql`,
+`supabase/functions/notify-cron/index.ts`, klient-hooks i `index.html`
+(sök på "GAME NOTIFICATIONS (Brief B)").
 Pity-counters är per spelare (ej per team) — oförändrat från Fas 1-designen, bara flyttat till Supabase.
 
 ### Realtid vs. refresh-on-load
