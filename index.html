@@ -3948,13 +3948,32 @@ function maybePushRankUp(nextRankName) {
 }
 
 // T2 — aktivt pass: visa vid start, stäng (utan ny notis) vid avslut.
+// data.persistent talar om för sw.js att den inte får försvinna vid tryck —
+// den ska bara stängas av vår egen action:'close'-push eller manuellt av användaren.
 function pushActiveSessionNotif() {
   _gamePush({title:'ARISE', body:'You have an active session — Click to open session',
-             tag:'active-session-' + activeProfileId()});
+             tag:'active-session-' + activeProfileId(),
+             data:{url:'./index.html?openSession=1', persistent:true}});
 }
 function closeActiveSessionNotif() {
   _gamePush({title:'ARISE', body:'Session complete',
              tag:'active-session-' + activeProfileId(), action:'close'});
+}
+
+// Tryck på T2-notisen: om appen redan är öppen postar sw.js ett meddelande hit
+// istället för att navigera om (undviker en full omladdning + iOS navigate()-kvirkar).
+if('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', function(event){
+    if(event.data && event.data.type === 'notif-click' && activeSession) openSessionModal();
+  });
+}
+
+// Kallt öppnad från notisen (appen låg inte redan i minnet) — sw.js öppnade
+// ./index.html?openSession=1 istället för att kunna posta ett meddelande.
+function openSessionFromUrlIfRequested() {
+  if(location.search.indexOf('openSession=1') === -1) return;
+  history.replaceState(null, '', location.pathname);
+  if(activeSession) openSessionModal();
 }
 
 // T3 — veckomål uppnått. Deduplicerad per ISO-vecka så en extra
@@ -4501,6 +4520,7 @@ function bootApp() {
   registerServiceWorker();
   ensureNotifPrefs();
   syncNotifState();
+  openSessionFromUrlIfRequested();
   // Gate-state hämtas från Supabase efter att UI:t bootats med lokal spegel.
   // Presence-hjärtslaget startas EFTER gate-synken: offline-intjänad XP ska
   // processas medan last_seen_at ännu är gammal, annars gate:as L1/L2 bort.
