@@ -1,5 +1,5 @@
 # ARISE — Hunter Training System
-## Master Briefing Document (v12)
+## Master Briefing Document (v13)
 
 > Klistra in detta dokument i en ny Claude Code-session och säg:
 > **"Bygg/uppdatera appen baserat på briefingen nedan. Använd React eller plain HTML/JS, spara så jag kan öppna i webbläsaren."**
@@ -21,6 +21,8 @@
 > **Nytt i v12:** ✅ **Bugg fixad — oavsiktlig start-inventory borttagen.** Nya profiler startade felaktigt med 8 hårdkodade demo-items (`DEMO_ITEMS`) istället för en tom inventory. Kvarleva från tidig utveckling (användes för att snabbt kunna testa UI för alla rariteter/slots) som aldrig plockades bort inför Fas 2. Buggen låg i `defaultState()`-funktionen (inventory-fältet) samt i `loadState()`-funktionens item-migreringsblock i `arise.html`. Båda ställena är nu rättade — nya profiler startar med `inventory: []`. Samtliga befintliga profilers (Philip, Jonathans) sparade inventory har även nollställts manuellt, så alla står nu på 0 items. Se "Inventory-system" för uppdaterad startregel.
 >
 > **Nytt i v12 (2):** ✅ **Mobilhosting via GitHub Pages satt upp.** Appen är nu publicerad live på en publik URL så den kan öppnas direkt på mobilen (och av Jonathan), istället för att bara köras lokalt via `arise.html`. Repot är **publikt** (medvetet val — se "Hosting & Deployment" nedan för avvägningen kring Supabase anon-key-exponering). Se ny sektion **"Hosting & Deployment"** för URL, repo-struktur och pusha-flöde.
+>
+> **Nytt i v13:** ✅ **Leaderboard-bugg fixad — hårdkodad vän-lista borttagen.** RANKS-tabben visade fyra påhittade demo-vänner sedan Fas 1, som aldrig byttes ut mot riktig Supabase-data när Fas 2 landade (samma mönster som DEMO_ITEMS-buggen i v12). Ersatt med live hämtning från `profiles`-tabellen. Upptäckte samtidigt att `profiles.rank/level/xp` aldrig synkades från klientens lokala state efter profilskapande (frusen vid E1 för alltid) — lade till en liten fire-and-forget-synk (`syncProfileRank()`) så leaderboarden faktiskt visar verklig progress. Se "Vänner / Leaderboard (RANKS-tab)" för detaljer.
 >
 > **Referensdokument:** Referera till `ARISE_items_v1.md` för fullständig item-lista. Referera till `ARISE_briefing_items.md` för detaljerad passiv-logik per item. Referera till `ARISE_Fas2_Brief_A_Sonnet_Setup.md` och `ARISE_Fas2_Brief_B_Fable_MultiplayerSync.md` för de ursprungliga implementationsbriefarna om lågnivådetaljer behövs.
 
@@ -1248,14 +1250,13 @@ background-size: 40px 40px;
 
 ## Vänner / Leaderboard (RANKS-tab)
 
-Hårdkodade demo-vänner:
-```
-Marcus — B3
-Erik   — C7
-Sara   — D15
-Lina   — D4
-```
-Sorterade efter rank sedan level. Nuvarande användare visas med ◄-markör.
+**Sedan v13:** Datakällan är live Supabase `profiles`-tabellen, inte längre en hårdkodad lista. `renderLeaderboard()` hämtar `id, display_name, rank, level` för samtliga profiler vid varje öppning av RANKS-tabben (refresh-on-load, ingen Realtime-subscription — matchar Fas 2:s princip för icke-tidskritisk data). Sorteras efter rank (E→S) sedan level inom samma rank. Nuvarande inloggad profil (`arise_active_profile`) markeras med ◄-markör. Skalar automatiskt till valfritt antal profiler (upp till de 5 platserna i PIN-onboardingen) — inget hårdkodat antal rader.
+
+Edge cases: tomt/misslyckat Supabase-anrop visar ett tomt-state istället för att krascha renderingen; en enda profil visas utan problem.
+
+**Förutsättning som byggdes samtidigt:** `profiles.rank/level/xp` synkades tidigare aldrig från klientens lokala state efter profilskapande (frös vid E1/0 XP för alltid — samma mönster som DEMO_ITEMS-buggen). `syncProfileRank()` skriver nu rank/level/xp till Supabase fire-and-forget varje gång de faktiskt ändras (i `processLevels()` och `confirmRankUp()`), så leaderboarden visar verklig progress.
+
+**Historik (Fas 1, borttaget i v13):** tidigare visades fyra påhittade demo-vänner, hårdkodade i `renderRanks()`.
 
 ---
 

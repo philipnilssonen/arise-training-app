@@ -1197,6 +1197,19 @@ function addXP(amount, source) {
   renderStatus();
 }
 
+// Håller profiles.rank/level/xp i Supabase i synk med lokal state — utan detta
+// blir RANKS-leaderboarden fryst vid vad profilen hade vid skapande (E1).
+// Fire-and-forget, ingen debounce: skrivs bara vid faktiska rank/level-ändringar
+// (processLevels + confirmRankUp), inte på varje saveState().
+function syncProfileRank() {
+  const pid = activeProfileId();
+  if(!pid) return;
+  supa.from('profiles')
+    .update({rank: RANKS[state.rank], level: state.level, xp: state.xp})
+    .eq('id', pid)
+    .then(function(){}).catch(function(){});
+}
+
 function processLevels() {
   if(state.rankUpPending) return; // wait for rank-up form
   const startLevel = state.level;
@@ -1224,6 +1237,7 @@ function processLevels() {
     notifQueue.push({rank:state.rank, fromLevel:startLevel, toLevel:state.level, points:pointsGained});
     if(!notifShowing) showNextNotif();
     maybePushLevelUp();
+    syncProfileRank();
   }
   if(justRankPending) maybePushRankUp(RANKS[Math.min(state.rank + 1, 5)]);
 }
@@ -2454,32 +2468,54 @@ function renderLogHistory() {
 // ============================================================
 //  RANKS TAB RENDER
 // ============================================================
-function renderRanks() {
-  const friends = [
-    {name:'Marcus', rank:3, level:3},
-    {name:'Erik',   rank:2, level:7},
-    {name:'Sara',   rank:1, level:15},
-    {name:'Lina',   rank:1, level:4},
-  ];
-  const me = {name:state.name, rank:state.rank, level:state.level, isMe:true};
-  const all = [...friends, me].sort((a,b) => {
-    if(b.rank !== a.rank) return b.rank - a.rank;
-    return b.level - a.level;
-  });
-
+// Leaderboarden hämtas live från Supabase profiles (refresh-on-load, ingen
+// Realtime-subscription — se Fas 2-arkitekturen). Ersätter den hårdkodade
+// påhittade vän-listan från Fas 1 (samma mönster som DEMO_ITEMS-buggen).
+let _leaderboardBusy = false;
+async function renderLeaderboard() {
   const el = document.getElementById('leaderboard');
-  el.innerHTML = all.map((p,i) => {
-    const rName = RANKS[p.rank];
-    const color = RANK_COLORS[rName];
-    return `<div class="lb-entry${p.isMe?' me':''}">
-      <div class="lb-pos">${i+1}</div>
-      <div>
-        <div class="lb-name">${p.name}${p.isMe?` <span class="lb-me-tag">◄ YOU</span>`:''}</div>
-        <div style="font-size:10px;color:var(--dim)">${RANK_TITLES[rName]}</div>
-      </div>
-      <div class="lb-rank" style="color:${color}">${rName}${p.level}</div>
-    </div>`;
-  }).join('');
+  if(!el || _leaderboardBusy) return;
+  _leaderboardBusy = true;
+  try {
+    const {data, error} = await supa.from('profiles')
+      .select('id, display_name, rank, level');
+    if(error) throw error;
+
+    const me = activeProfileId();
+    const list = (data || []).map(function(p){
+      const rankIdx = Math.max(0, RANKS.indexOf(p.rank || 'E'));
+      return {id:p.id, name:p.display_name || '?', rankIdx:rankIdx, level:p.level || 1, isMe:p.id === me};
+    }).sort(function(a,b){
+      if(b.rankIdx !== a.rankIdx) return b.rankIdx - a.rankIdx;
+      return b.level - a.level;
+    });
+
+    if(list.length === 0) {
+      el.innerHTML = '<div style="color:var(--dim);font-family:\'Barlow Condensed\',sans-serif;text-align:center;padding:20px">No hunters found.</div>';
+      return;
+    }
+
+    el.innerHTML = list.map(function(p, i){
+      const rName = RANKS[p.rankIdx];
+      const color = RANK_COLORS[rName];
+      return '<div class="lb-entry'+(p.isMe?' me':'')+'">'
+        + '<div class="lb-pos">'+(i+1)+'</div>'
+        + '<div>'
+          + '<div class="lb-name">'+esc(p.name)+(p.isMe?' <span class="lb-me-tag">◄ YOU</span>':'')+'</div>'
+          + '<div style="font-size:10px;color:var(--dim)">'+RANK_TITLES[rName]+'</div>'
+        + '</div>'
+        + '<div class="lb-rank" style="color:'+color+'">'+rName+p.level+'</div>'
+      + '</div>';
+    }).join('');
+  } catch(e) {
+    el.innerHTML = '<div style="color:var(--dim);font-family:\'Barlow Condensed\',sans-serif;text-align:center;padding:20px">Could not load leaderboard.</div>';
+  } finally {
+    _leaderboardBusy = false;
+  }
+}
+
+function renderRanks() {
+  renderLeaderboard(); // async — live Supabase data, se ovan
 
   // Rank progression chart
   const rpEl = document.getElementById('rank-progression');
@@ -2809,6 +2845,7 @@ function confirmRankUp() {
   // Skill cap increases with rank — nothing to reset, new cap unlocked
   document.getElementById('rankup-overlay').classList.remove('show');
   saveState();
+  syncProfileRank();
   renderAll();
 
   // Show rank-up notification
@@ -3088,7 +3125,7 @@ document.addEventListener('click', function(e) {
   else if(a === 'nav_character') { switchTab('character'); renderCharacter(); }
   else if(a === 'nav_train')     { switchTab('train'); renderPlan(); renderLog(); }
   else if(a === 'nav_gates')     { switchTab('gates'); renderGate(); }
-  else if(a === 'nav_ranks')     switchTab('ranks');
+  else if(a === 'nav_ranks')     { switchTab('ranks'); renderLeaderboard(); }
 
   else if(a === 'dismissNotif') dismissNotif();
   else if(a === 'openRankUp')  openRankUp();
