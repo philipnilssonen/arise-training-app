@@ -165,11 +165,13 @@ body{
 .day-card.today{border-color:rgba(0,229,255,.4)}
 .day-card.gym-day{border-left:3px solid var(--accent)}
 .day-card.quest-day{border-left:3px solid var(--rank-d)}
+.day-card.cardio-day{border-left:3px solid #34d399}
 .day-card.rest-day{border-left:3px solid var(--border);opacity:.6}
 .day-name{font-size:12px;font-weight:700;letter-spacing:1px;color:var(--dim);width:32px}
 .day-tag{font-size:9px;font-weight:700;letter-spacing:2px;padding:2px 6px;border-radius:2px;flex-shrink:0}
 .tag-gym{background:rgba(0,229,255,.15);color:var(--accent);border:1px solid rgba(0,229,255,.3)}
 .tag-quest{background:rgba(52,211,153,.1);color:var(--rank-d);border:1px solid rgba(52,211,153,.3)}
+.tag-cardio{background:rgba(52,211,153,.1);color:#34d399;border:1px solid rgba(52,211,153,.3)}
 .tag-rest{background:rgba(255,255,255,.04);color:var(--dim);border:1px solid var(--border)}
 .day-title{flex:1;font-size:14px;font-weight:600;color:var(--light)}
 .day-exercises{font-family:'Barlow Condensed',sans-serif;font-size:11px;color:var(--dim);flex:2}
@@ -580,6 +582,7 @@ body{
           <button class="btn btn-sm btn-gold" data-a="demo_startGate" style="grid-column:1/-1">⚔ START DEMO GATE (500 HP)</button>
           <button class="btn btn-sm btn-danger" data-a="demo_clearAllInventories" style="grid-column:1/-1">🗑 ONE-TIME: CLEAR ALL INVENTORIES (this device)</button>
           <button class="btn btn-sm" data-a="sendTestPush" style="grid-column:1/-1">🔔 SEND TEST PUSH</button>
+          <button class="btn btn-sm" data-a="syncPresetData" style="grid-column:1/-1">🔁 SYNC PRESET DATA</button>
           <button class="btn btn-sm btn-danger" data-a="resetAll" style="grid-column:1/-1">🔄 RESET PROFILE</button>
         </div>
       </div>
@@ -1005,12 +1008,165 @@ const DEFAULT_SCHEDULE = [
 ];
 
 // ============================================================
+//  PRESET PROFILES (onboarding — "Philips profil" / "Jonathans profil" /
+//  "Markus profil" pickers in renderGateNew()). Each preset carries its own
+//  physical stats, an EXPLICIT nutrition target (not run through the generic
+//  BMR formula in calcNutrition() — real-world targets don't match what that
+//  formula outputs), a weekly schedule + customWorkouts bundle (same shape
+//  the workout editor already uses), and a kostplan meal list (same shape as
+//  KOSTPLAN_MEALS). 'scratch' profiles get none of this and fall through to
+//  the generic defaultState()/calcNutrition()/KOSTPLAN_MEALS behavior.
+// ============================================================
+const SWE_BODYTYPE = {Ectomorph:'Ektomorf', Mesomorph:'Mesomorf', Endomorph:'Endomorf'};
+
+const PRESETS = {
+  philip: {
+    profile: {age:27, gender:'Male', weight:73, height:187, bodyType:'Ectomorph', goal:'Build Muscle', split:'Bro Split', daysPerWeek:4},
+    goalLabel: 'bygga muskelmassa', splitLabel: 'Bro Split',
+    nutrition: {calories:3200, protein:146, water:2.6},
+    schedule: [
+      {day:'MON',type:'gym', workoutIdx:0},
+      {day:'TUE',type:'gym', workoutIdx:1},
+      {day:'WED',type:'rest',workoutIdx:null},
+      {day:'THU',type:'gym', workoutIdx:2},
+      {day:'FRI',type:'rest',workoutIdx:null},
+      {day:'SAT',type:'gym', workoutIdx:3},
+      {day:'SUN',type:'rest',workoutIdx:null},
+    ],
+    workouts: null, // uses BRO_SPLIT directly — unchanged from original behavior
+    kostplan: null, // uses KOSTPLAN_MEALS directly — unchanged from original behavior
+  },
+  jonathan: {
+    profile: {age:28, gender:'Male', weight:78, height:181, bodyType:'Mesomorph', goal:'Maintain', split:'Upper/Lower', daysPerWeek:4},
+    goalLabel: 'recomp — minska fett, bli starkare', splitLabel: 'Upper/Lower + Cardio-hybrid',
+    nutrition: {calories:2500, protein:170, water:2.7},
+    schedule: [
+      {day:'MON',type:'gym',   workoutIdx:0},
+      {day:'TUE',type:'gym',   workoutIdx:1},
+      {day:'WED',type:'cardio',workoutIdx:null},
+      {day:'THU',type:'gym',   workoutIdx:2},
+      {day:'FRI',type:'rest',  workoutIdx:null},
+      {day:'SAT',type:'gym',   workoutIdx:3},
+      {day:'SUN',type:'rest',  workoutIdx:null},
+    ],
+    workouts: [
+      {name:'Överkropp Styrka', exercises:[
+        {name:'Bänkpress',          sets:4, reps:'5-8'},
+        {name:'Skivstångsrodd',     sets:4, reps:'5-8'},
+        {name:'Overhead Press',     sets:4, reps:'5-8'},
+        {name:'Latsdrag',           sets:4, reps:'5-8'},
+        {name:'Triceps Pushdown',   sets:3, reps:'10-12'},
+        {name:'Skivstångscurl',     sets:3, reps:'10-12'},
+      ]},
+      {name:'Underkropp Styrka', exercises:[
+        {name:'Knäböj',              sets:4, reps:'5-8'},
+        {name:'Rumänsk marklyft',    sets:4, reps:'5-8'},
+        {name:'Benpress',            sets:3, reps:'8-10'},
+        {name:'Hip Thrust',          sets:3, reps:'8-10'},
+        {name:'Stående Calf Raise',  sets:3, reps:'12-15'},
+      ]},
+      {name:'Full Body Hypertrofi', exercises:[
+        {name:'Hantelpress (lutande)',    sets:3, reps:'10-12'},
+        {name:'Kabelrodd',                sets:3, reps:'12-15'},
+        {name:'Laterallyft',              sets:3, reps:'12-15'},
+        {name:'Bulgariska utfallssteg',   sets:3, reps:'10/sida'},
+        {name:'Leg Curl',                 sets:3, reps:'12-15'},
+        {name:'Face Pulls',               sets:3, reps:'15'},
+        {name:'Hammer Curl',              sets:3, reps:'12-15'},
+      ]},
+    ],
+    kostplan: [
+      {label:'FRUKOST', time:'ca 07:00', kcal:350, protein:25,
+        items:['Kvarg 200g + bär + nötter 20g'], note:null, optional:false},
+      {label:'MELLANMÅL 1', time:'ca 11:00', kcal:200, protein:18,
+        items:['Kvarg 150g + frukt'], note:null, optional:false},
+      {label:'LUNCH', time:'ca 13:00', kcal:650, protein:45,
+        items:['Proteinkälla 200g (kyckling/nötkött/fisk)', 'Kolhydratkälla 150g (ris/pasta/potatis)', 'Grönsaker'], note:null, optional:false},
+      {label:'MELLANMÅL 2', time:'eftermiddag', kcal:200, protein:38,
+        items:['Proteinrikt alternativ (shake, kvarg 200g, greek yoghurt eller cottage cheese)'], note:null, optional:false},
+      {label:'MIDDAG', time:'ca 18:30–19:00', kcal:700, protein:45,
+        items:['Proteinkälla 200g (kyckling/nötkött/fisk)', 'Kolhydratkälla 150g (ris/pasta/potatis)', 'Grönsaker'],
+        note:'Resterande ~400 kcal täcks naturligt av variation i tillagning och portionsstorlekar.', optional:false},
+    ],
+  },
+  markus: {
+    profile: {age:26, gender:'Male', weight:92, height:175, bodyType:'Endomorph', goal:'Lose Fat', split:'Push/Pull/Legs', daysPerWeek:5},
+    goalLabel: 'fettförlust, bibehåll muskler (cut)', splitLabel: 'PPL + Cardio-hybrid',
+    nutrition: {calories:2100, protein:156, water:3.2},
+    schedule: [
+      {day:'MON',type:'gym',   workoutIdx:0},
+      {day:'TUE',type:'gym',   workoutIdx:1},
+      {day:'WED',type:'cardio',workoutIdx:null},
+      {day:'THU',type:'gym',   workoutIdx:2},
+      {day:'FRI',type:'gym',   workoutIdx:3},
+      {day:'SAT',type:'cardio',workoutIdx:null},
+      {day:'SUN',type:'gym',   workoutIdx:4},
+    ],
+    workouts: [
+      {name:'Push (Bröst/Axlar/Triceps)', exercises:[
+        {name:'Bänkpress',              sets:4, reps:'8-12'},
+        {name:'Hantelpress (lutande)',  sets:3, reps:'10-12'},
+        {name:'Militärpress',           sets:3, reps:'10-12'},
+        {name:'Sidolyft',               sets:3, reps:'12-15'},
+        {name:'Triceps Pushdown',       sets:3, reps:'12-15'},
+      ]},
+      {name:'Pull (Rygg/Biceps)', exercises:[
+        {name:'Marklyft',           sets:4, reps:'6-10'},
+        {name:'Latsdrag',           sets:4, reps:'8-12'},
+        {name:'Skivstångsrodd',     sets:3, reps:'10-12'},
+        {name:'Face Pulls',         sets:3, reps:'15'},
+        {name:'Hantelcurl',         sets:3, reps:'12-15'},
+      ]},
+      {name:'Legs (Ben)', exercises:[
+        {name:'Knäböj',                    sets:4, reps:'8-12'},
+        {name:'Rumänsk marklyft',          sets:3, reps:'10-12'},
+        {name:'Benpress',                  sets:3, reps:'10-12'},
+        {name:'Bulgariska utfallssteg',    sets:3, reps:'10/sida'},
+        {name:'Stående Calf Raise',        sets:3, reps:'15-20'},
+      ]},
+      {name:'Upper Accessory (Hypertrofi)', exercises:[
+        {name:'Kabelrodd',                          sets:3, reps:'12-15'},
+        {name:'Hammer Curl',                        sets:3, reps:'12-15'},
+        {name:'Dips eller Triceps-maskin',          sets:3, reps:'12-15'},
+        {name:'Laterallyft',                        sets:3, reps:'15'},
+        {name:'Plankan',                            sets:3, reps:'45-60 sek'},
+        {name:'Russian Twists',                     sets:3, reps:'20'},
+      ]},
+      {name:'Full Body (lätt benfokus)', exercises:[
+        {name:'Rodd (maskin)',              sets:3, reps:'12-15'},
+        {name:'Hantelpress, stående',       sets:3, reps:'10-12'},
+        {name:'Kabeldrag rak arm',          sets:3, reps:'12-15'},
+        {name:'Goblet Squat',               sets:2, reps:'12'},
+        {name:'Crunches',                   sets:3, reps:'20'},
+        {name:'Russian Twists',             sets:3, reps:'20'},
+        {name:'Plankan',                    sets:3, reps:'45-60 sek'},
+      ]},
+    ],
+    kostplan: [
+      {label:'FRUKOST', time:'', kcal:300, protein:26,
+        items:['Kvarg 200g + bär + nötter 15g'], note:null, optional:false},
+      {label:'MELLANMÅL 1', time:'', kcal:180, protein:16,
+        items:['Kvarg 150g + frukt'], note:null, optional:false},
+      {label:'LUNCH', time:'', kcal:560, protein:42,
+        items:['Proteinkälla 180g (kyckling/nötkött/fisk)', 'Kolhydratkälla 120g (ris/pasta/potatis)', 'Grönsaker'], note:null, optional:false},
+      {label:'MELLANMÅL 2', time:'', kcal:160, protein:30,
+        items:['Proteinshake eller kvarg 150g'], note:null, optional:false},
+      {label:'MIDDAG', time:'', kcal:600, protein:42,
+        items:['Proteinkälla 180g (kyckling/nötkött/fisk)', 'Kolhydratkälla 100g (ris/pasta/potatis)', 'Grönsaker'],
+        note:'Resterande ~300 kcal täcks av fri variation (extra portion kolhydrat/protein).', optional:false},
+    ],
+  },
+};
+
+// ============================================================
 //  STATE
 // ============================================================
-function defaultState() {
-  return {
+function defaultState(presetKey) {
+  const preset = presetKey && PRESETS[presetKey];
+  const base = {
     name:'Philip', age:27, gender:'Male', weight:73, height:187,
-    bodyType:'Ectomorph', goal:'Build Muscle', split:'Bro Split', daysPerWeek:4,
+    bodyType:'Ectomorph', goal:'Build Muscle', goalLabel:null, split:'Bro Split', splitLabel:null, daysPerWeek:4,
+    presetKey: presetKey || null, nutritionOverride: null, kostplanMeals: null,
     rank:0, level:1, xp:0,
     totalXpEarned:0,
     str:0, agi:0, vit:0, dis:0,
@@ -1050,6 +1206,16 @@ function defaultState() {
       gateId:null, teamId:null, partySize:1, partyNames:[],
     },
   };
+  if(preset) {
+    Object.assign(base, preset.profile);
+    base.goalLabel = preset.goalLabel || null;
+    base.splitLabel = preset.splitLabel || null;
+    base.nutritionOverride = preset.nutrition || null;
+    base.kostplanMeals = preset.kostplan ? JSON.parse(JSON.stringify(preset.kostplan)) : null;
+    base.schedule = JSON.parse(JSON.stringify(preset.schedule));
+    base.customWorkouts = preset.workouts ? JSON.parse(JSON.stringify(preset.workouts)) : null;
+  }
+  return base;
 }
 
 let state = loadState();
@@ -1062,13 +1228,13 @@ let notifTimer = null;
 function activeProfileId() { return localStorage.getItem('arise_active_profile'); }
 function profileStateKey(pid) { pid = pid || activeProfileId(); return pid ? 'arise_state_' + pid : null; }
 
-function loadState() {
+function loadState(presetKey) {
   try {
     const key = profileStateKey();
     const s = key ? localStorage.getItem(key) : null;
     if(s) {
       const parsed = JSON.parse(s);
-      const def = defaultState();
+      const def = defaultState(presetKey);
       const merged = Object.assign(def, parsed);
       merged.gate     = Object.assign(def.gate,     parsed.gate     || {});
       // Migrate old 'weapon' slot → 'weapon1'
@@ -1111,7 +1277,26 @@ function loadState() {
       return merged;
     }
   } catch(e){}
-  return defaultState();
+  return defaultState(presetKey);
+}
+
+// Non-destructive: re-applies the linked preset's profile/nutrition/schedule/
+// kostplan onto the current state, without touching rank/xp/stats/inventory/
+// gate/logs. Lets an existing profile (e.g. Jonathan, created before this
+// preset system existed) pick up corrected preset data without losing progress.
+function syncPresetData() {
+  const preset = state.presetKey && PRESETS[state.presetKey];
+  if(!preset) { showToast('Denna profil har ingen kopplad preset'); return; }
+  Object.assign(state, preset.profile);
+  state.goalLabel = preset.goalLabel || null;
+  state.splitLabel = preset.splitLabel || null;
+  state.nutritionOverride = preset.nutrition || null;
+  state.kostplanMeals = preset.kostplan ? JSON.parse(JSON.stringify(preset.kostplan)) : null;
+  state.schedule = JSON.parse(JSON.stringify(preset.schedule));
+  state.customWorkouts = preset.workouts ? JSON.parse(JSON.stringify(preset.workouts)) : null;
+  saveState();
+  renderAll();
+  showToast('Preset synkad — nutrition, schema & kostplan uppdaterade');
 }
 
 function saveState() {
@@ -1160,6 +1345,7 @@ function migrateClearAllInventories() {
 //  NUTRITION CALCULATIONS
 // ============================================================
 function calcNutrition() {
+  if(state.nutritionOverride) return state.nutritionOverride;
   const bmr = 10*state.weight + 6.25*state.height - 5*state.age + 5;
   const tdee = bmr * 1.465;
   let calories = tdee;
@@ -2213,6 +2399,13 @@ function renderTodaySession() {
 
   if(sched.type === 'rest') {
     el.innerHTML = `<div class="session-card"><div class="session-type">REST DAY</div><div class="session-name" style="color:var(--dim)">Recovery & Rest</div><div class="session-exercises">Focus on sleep, mobility, and nutrition.</div></div>`;
+  } else if(sched.type === 'cardio') {
+    el.innerHTML = `<div class="session-card">
+      <div class="session-type" style="color:#34d399">CARDIO</div>
+      <div class="session-name">Löpning eller cykel</div>
+      <div class="session-exercises">25–30 min, måttlig intensitet.</div>
+      <div style="margin-top:10px"><button class="btn btn-sm" style="width:100%" data-a="goLogCardio">LOG CARDIO</button></div>
+    </div>`;
   } else if(sched.type === 'quest') {
     const q = QUEST_BY_RANK[state.rank];
     const questExercises = [
@@ -2329,8 +2522,8 @@ function renderPlan() {
   grid.innerHTML = state.schedule.map(function(d, i) {
     const isToday = i === todayIdx;
     const isSelected = configMode && swapSelected === i;
-    const typeClass = d.type==='gym'?'gym-day':d.type==='quest'?'quest-day':'rest-day';
-    const tagHtml  = d.type==='gym'?'<span class="day-tag tag-gym">GYM</span>':d.type==='quest'?'<span class="day-tag tag-quest">QUEST</span>':'<span class="day-tag tag-rest">REST</span>';
+    const typeClass = d.type==='gym'?'gym-day':d.type==='quest'?'quest-day':d.type==='cardio'?'cardio-day':'rest-day';
+    const tagHtml  = d.type==='gym'?'<span class="day-tag tag-gym">GYM</span>':d.type==='quest'?'<span class="day-tag tag-quest">QUEST</span>':d.type==='cardio'?'<span class="day-tag tag-cardio">CARDIO</span>':'<span class="day-tag tag-rest">REST</span>';
 
     let title='Rest Day', exercises='';
     if(d.type==='gym' && d.workoutIdx!==null) {
@@ -2339,6 +2532,8 @@ function renderPlan() {
       else { const w=BRO_SPLIT[d.workoutIdx]; title=w?w.name:'Workout'; exercises=w?w.exerciseList.slice(0,3).map(function(e){return e.name;}).join(', ')+'...':''; }
     } else if(d.type==='quest') {
       const q=QUEST_BY_RANK[state.rank]; title='Daily Quest'; exercises=q.reps+'× push-ups, sit-ups, squats, lunges';
+    } else if(d.type==='cardio') {
+      title='Cardio'; exercises='Löpning eller cykel, 25–30 min';
     }
 
     // In configure mode: swap on card click + ✏️ for gym days
@@ -2904,6 +3099,9 @@ function showDayDetail(i) {
 
   if(d.type==='rest') {
     html += 'REST DAY</div><div style="font-family:\'Barlow Condensed\',sans-serif;font-size:14px;color:var(--dim)">Recovery day. Focus on sleep, mobility, and nutrition.</div>';
+  } else if(d.type==='cardio') {
+    html += 'CARDIO</div><div style="font-family:\'Barlow Condensed\',sans-serif;font-size:14px;color:var(--dim);margin-bottom:12px">Löpning eller cykel, 25–30 min, måttlig intensitet.</div>' +
+      '<button class="btn btn-sm" data-a="goLogCardio">LOG CARDIO</button>';
   } else if(d.type==='quest') {
     const q = QUEST_BY_RANK[state.rank];
     html += 'DAILY QUEST</div><div class="exercise-list">';
@@ -3012,7 +3210,11 @@ function renderTrainNutrition() {
     { icon:'💧', label:'VATTEN', value:water+' L', unit:'per dag',
       desc:'Drick vatten jämnt fördelat under dagen. Öka med ~0.5 L på träningsdagar för att kompensera svettförlust.' },
     { icon:'🔥', label:'KALORIER', value:calories.toLocaleString(), unit:'kcal per dag',
-      desc:'Ditt kaloriintag är beräknat för muskeluppbyggnad med ett måttligt överskott. Prioritera hela livsmedel och håll överskottet konsekvent — spikes i ätande ger sällan mer muskelmassa.' },
+      desc: state.goal === 'Lose Fat'
+        ? 'Ditt kaloriintag är beräknat med ett underskott för fettförlust. Prioritera hela livsmedel och håll underskottet konsekvent — stora svängningar i ätande gör det svårare att hålla kursen.'
+        : state.goal === 'Build Muscle'
+        ? 'Ditt kaloriintag är beräknat för muskeluppbyggnad med ett måttligt överskott. Prioritera hela livsmedel och håll överskottet konsekvent — spikes i ätande ger sällan mer muskelmassa.'
+        : 'Ditt kaloriintag är beräknat för att bibehålla vikten samtidigt som kroppssammansättningen förbättras. Håll intaget konsekvent dag till dag.' },
     { icon:'🥩', label:'PROTEIN', value:protein+'g', unit:'per dag',
       desc:'Fördela proteinintaget på 3–5 måltider per dag för maximal muskelproteinsyntes. Sikta på minst 30–40g per måltid. Bra källor: kyckling, kvarg, ägg, lax och proteinshake vid behov.' },
   ];
@@ -3108,7 +3310,9 @@ document.addEventListener('click', function(e) {
   if(a === 'settings')         openSettings();
   else if(a === 'closeSettings') closeSettings();
   else if(a === 'saveSettings') saveSettings();
-  else if(a === 'resetAll')    { if(confirm('Reset all data?')) { const k = profileStateKey(); if(k) localStorage.removeItem(k); state = defaultState(); saveState(); renderAll(); } }
+  else if(a === 'resetAll')    { if(confirm('Reset all data?')) { const k = profileStateKey(); const pk = state.presetKey; if(k) localStorage.removeItem(k); state = defaultState(pk); saveState(); renderAll(); } }
+  else if(a === 'syncPresetData') syncPresetData();
+  else if(a === 'goLogCardio') { switchTab('train'); state.logType = 'cardio'; renderPlan(); renderLog(); }
   else if(a === 'enablePush')  enablePushNotifications();
   else if(a === 'sendTestPush') sendTestPush();
 
@@ -3665,14 +3869,17 @@ function toggleKostTips() {
 }
 
 function renderKostplan() {
-  const totalNoOpt  = KOSTPLAN_MEALS.filter(function(m){ return !m.optional; }).reduce(function(a,m){ return {kcal:a.kcal+m.kcal, protein:a.protein+m.protein}; }, {kcal:0, protein:0});
-  const totalWithOpt = KOSTPLAN_MEALS.reduce(function(a,m){ return {kcal:a.kcal+m.kcal, protein:a.protein+m.protein}; }, {kcal:0, protein:0});
+  const meals = state.kostplanMeals || KOSTPLAN_MEALS;
+  const totalNoOpt  = meals.filter(function(m){ return !m.optional; }).reduce(function(a,m){ return {kcal:a.kcal+m.kcal, protein:a.protein+m.protein}; }, {kcal:0, protein:0});
+  const totalWithOpt = meals.reduce(function(a,m){ return {kcal:a.kcal+m.kcal, protein:a.protein+m.protein}; }, {kcal:0, protein:0});
+  const bodyTypeSwe = SWE_BODYTYPE[state.bodyType] || state.bodyType;
+  const goalText = state.goalLabel || state.goal;
 
   let html = '<div class="panel" style="margin-bottom:12px">';
   html += '<div class="panel-title">KOSTPLAN</div>';
-  html += '<div style="font-size:11px;font-family:\'Barlow Condensed\',sans-serif;color:var(--dim);line-height:1.55;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid rgba(0,200,255,.12)">Anpassad för Philip · 73 kg · Ektomorf · Mål: bygga muskelmassa. Ät regelbundet — 5–6 mål per dag håller anabolismen igång och minimerar fettinlagring.</div>';
+  html += '<div style="font-size:11px;font-family:\'Barlow Condensed\',sans-serif;color:var(--dim);line-height:1.55;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid rgba(0,200,255,.12)">Anpassad för '+esc(state.name)+' · '+state.weight+' kg · '+esc(bodyTypeSwe)+' · Mål: '+esc(goalText)+'. Ät regelbundet och håll koll på portionsstorlekarna.</div>';
 
-  KOSTPLAN_MEALS.forEach(function(m) {
+  meals.forEach(function(m) {
     html += '<div style="margin-bottom:10px;padding:10px 12px;background:rgba(0,180,255,.05);border:1px solid rgba(0,200,255,.13);border-radius:6px">';
     html += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">';
     html += '<div style="display:flex;align-items:center;gap:8px">';
@@ -4067,8 +4274,12 @@ function completeLogin(profile) {
   const key = profileStateKey(profile.id);
   const hadLocal = !!localStorage.getItem(key);
   localStorage.setItem('arise_active_profile', profile.id);
-  state = loadState();
-  if(!hadLocal) { state.name = profile.display_name; saveState(); }
+  state = loadState(profile.preset_key);
+  if(!hadLocal) { state.name = profile.display_name; }
+  // Backfill presetKey for profiles created before the preset system existed
+  // (e.g. Jonathan) — server-side preset_key is the source of truth here.
+  if(!state.presetKey && profile.preset_key) { state.presetKey = profile.preset_key; }
+  saveState();
   document.getElementById('profile-gate').classList.add('hidden');
   bootApp();
 }
@@ -4132,7 +4343,7 @@ function renderProfileSelect() {
   const cards = slots.map(function(p){
     if(!p) return '<div class="profile-card empty" data-a="gateNewSlot"><div class="profile-card-plus">+</div><div class="profile-card-name">Ny spelare</div></div>';
     const rk = (p.rank||'E').toLowerCase();
-    const badgeLabel = p.preset_key === 'philip' ? 'PHILIP' : p.preset_key === 'jonathan' ? 'JONATHAN' : 'CUSTOM';
+    const badgeLabel = p.preset_key === 'philip' ? 'PHILIP' : p.preset_key === 'jonathan' ? 'JONATHAN' : p.preset_key === 'markus' ? 'MARKUS' : 'CUSTOM';
     return '<div class="profile-card" data-a="gateSelect_'+p.id+'">' +
       '<div class="profile-card-avatar rank-'+rk+'">'+esc((p.display_name||'?').charAt(0).toUpperCase())+'</div>' +
       '<div class="profile-card-name">'+esc(p.display_name)+'</div>' +
@@ -4181,6 +4392,7 @@ function renderGateNew() {
     '<div class="preset-choice-row">' +
       presetBtnHtml('philip','Philips profil') +
       presetBtnHtml('jonathan','Jonathans profil') +
+      presetBtnHtml('markus','Markus profil') +
       presetBtnHtml(null,'Börja från scratch') +
     '</div>' +
     (gate.error ? '<div class="pin-error" style="margin-top:10px">'+esc(gate.error)+'</div>' : '') +

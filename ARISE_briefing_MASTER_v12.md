@@ -1,5 +1,5 @@
 # ARISE — Hunter Training System
-## Master Briefing Document (v13)
+## Master Briefing Document (v14)
 
 > Klistra in detta dokument i en ny Claude Code-session och säg:
 > **"Bygg/uppdatera appen baserat på briefingen nedan. Använd React eller plain HTML/JS, spara så jag kan öppna i webbläsaren."**
@@ -23,6 +23,14 @@
 > **Nytt i v12 (2):** ✅ **Mobilhosting via GitHub Pages satt upp.** Appen är nu publicerad live på en publik URL så den kan öppnas direkt på mobilen (och av Jonathan), istället för att bara köras lokalt via `arise.html`. Repot är **publikt** (medvetet val — se "Hosting & Deployment" nedan för avvägningen kring Supabase anon-key-exponering). Se ny sektion **"Hosting & Deployment"** för URL, repo-struktur och pusha-flöde.
 >
 > **Nytt i v13:** ✅ **Leaderboard-bugg fixad — hårdkodad vän-lista borttagen.** RANKS-tabben visade fyra påhittade demo-vänner sedan Fas 1, som aldrig byttes ut mot riktig Supabase-data när Fas 2 landade (samma mönster som DEMO_ITEMS-buggen i v12). Ersatt med live hämtning från `profiles`-tabellen. Upptäckte samtidigt att `profiles.rank/level/xp` aldrig synkades från klientens lokala state efter profilskapande (frusen vid E1 för alltid) — lade till en liten fire-and-forget-synk (`syncProfileRank()`) så leaderboarden faktiskt visar verklig progress. Se "Vänner / Leaderboard (RANKS-tab)" för detaljer.
+>
+> **Nytt i v14:** ✅ **Riktigt preset-system byggt — `preset_key` gjorde faktiskt ingenting förrän nu.** Vid granskning inför Markus (profil 3) visade det sig att `preset_key` (satt sedan v9/Fas 2) aldrig band till någon faktisk data — det styrde bara badge-texten (PHILIP/JONATHAN/CUSTOM) på profilväljaren. Alla profiler körde på ett enda hårdkodat `defaultState()` (Philips siffror: 73kg/187cm/27år/Ectomorph/Build Muscle), en enda global `BRO_SPLIT`-träningssplit och en enda global `KOSTPLAN_MEALS`-kostplan vars ingress bokstavligen var hårdkodad till "Anpassad för Philip". Jonathans fullständiga profil (dokumenterad nedan sedan v5) kom alltså **aldrig** in i koden — precisionen "Träningsprofil-koppling ska väljas dynamiskt (Fas 2)" i Kostplan-sektionen blev aldrig infriad. Detta är nu åtgärdat:
+> - Ny `PRESETS`-datastruktur (`arise.html`) — varje preset (`philip`/`jonathan`/`markus`) bär egna fysiska mått, ett **explicit nutritionsmål** (kcal/protein/vatten — beräknas INTE via `calcNutrition()`s generiska BMR-formel, eftersom verkliga mål sällan matchar vad formeln ger), ett veckoschema + `customWorkouts`, och en kostplan-måltidslista.
+> - `defaultState(presetKey)` och `loadState(presetKey)` slår upp presetet och fyller profilfält, schema, träningspass och nutritionsmål vid profilskapande. `calcNutrition()` returnerar presetets explicita mål om ett finns, annars den gamla generiska formeln (scratch-profiler opåverkade).
+> - Kostplanens ingress är nu beräknad från `state.name/weight/bodyType/goal` istället för hårdkodad text — gäller alla profiler, inte bara Philip.
+> - Ny schema-dagstyp `cardio` (separat från `gym`/`rest`) med egen tagg, dag-detaljvy och en "LOG CARDIO"-genväg till Log-fliken — behövdes för Markus separata cardio-pass.
+> - **Icke-destruktiv retrofit:** ny knapp `🔁 SYNC PRESET DATA` (Demo Tools) skriver om profil/nutrition/schema/kostplan från `PRESETS[state.presetKey]` UTAN att röra rank/xp/stats/inventory/gate/loggar. `completeLogin()` backfillar `state.presetKey` från Supabase-radens `preset_key` vid varje inloggning (funkar för profiler skapade före v14, t.ex. Jonathan). Se "Profil 3 — Markus" för hans data samt not om att Jonathans lokala enhet fortfarande behöver en engångs-tryckning på synk-knappen för att gamla sparade fält (vikt/schema/etc) ska uppdateras — helt nya fält (nutritionsmål, kostplan) fylls i automatiskt vid nästa inloggning utan knapptryck.
+> - Öppen punkt löst: aktivitetsmultiplikator-formeln formaliserades INTE till en tabell — istället lagras varje namngiven profils nutritionsmål explicit (ej extrapolerat), vilket är mer robust än att gissa en multiplikator per dagar/vecka.
 >
 > **Referensdokument:** Referera till `ARISE_items_v1.md` för fullständig item-lista. Referera till `ARISE_briefing_items.md` för detaljerad passiv-logik per item. Referera till `ARISE_Fas2_Brief_A_Sonnet_Setup.md` och `ARISE_Fas2_Brief_B_Fable_MultiplayerSync.md` för de ursprungliga implementationsbriefarna om lågnivådetaljer behövs.
 
@@ -136,6 +144,84 @@ Days/week:  4
 - Grönsaker är "gratis" — stor volym, låg kalorier, mättar bra
 - Håll koll på portionsstorleken på kolhydrater — lätt att omedvetet äta mer än planerat
 - Konsistens slår perfektion — en bra dag varje dag är bättre än en perfekt dag följt av tre dåliga
+
+---
+
+### Profil 3 — Markus (✅ AKTIV — sedan v14)
+
+> Markus profil är valbar via PIN-baserad profilval vid appstart, precis som Philip och Jonathan. All data nedan är den fullständiga preset (`PRESETS.markus`) som laddas när profilen väljs.
+
+```
+Name:       Markus
+Age:        26
+Gender:     Male
+Weight:     92 kg
+Height:     175 cm
+Body type:  Endomorph
+Goal:       Fettförlust, bibehåll muskler (cut)
+Split:      PPL + Cardio-hybrid
+Days/week:  5 gym + 2 cardio (separata pass)
+```
+
+**Nutritionsmål:** ~2 100 kcal · ~156g protein · ~3.2L vatten
+
+> Detta mål är ett medvetet kraftigare underskott än vad den generiska BMR×1.465-formeln (se Profil 1) skulle ge — precis som Jonathans mål inte matchar formeln exakt. Lagras därför som ett explicit `nutrition`-block i presetet, inte uträknat live. Se "Nytt i v14" ovan.
+
+#### Markus träningsschema
+
+**Dag 1 — Push (Bröst/Axlar/Triceps)**
+- Bänkpress 4×8–12
+- Hantelpress (lutande) 3×10–12
+- Militärpress 3×10–12
+- Sidolyft 3×12–15
+- Triceps Pushdown 3×12–15
+
+**Dag 2 — Pull (Rygg/Biceps)**
+- Marklyft 4×6–10
+- Latsdrag 4×8–12
+- Skivstångsrodd 3×10–12
+- Face Pulls 3×15
+- Hantelcurl 3×12–15
+
+**Dag 3 — Cardio**
+- Löpning eller cykel, 25–30 min, måttlig intensitet
+
+**Dag 4 — Legs (Ben)**
+- Knäböj 4×8–12
+- Rumänsk marklyft 3×10–12
+- Benpress 3×10–12
+- Bulgariska utfallssteg 3×10/sida
+- Stående Calf Raise 3×15–20
+
+**Dag 5 — Upper Accessory (Hypertrofi)**
+- Kabelrodd 3×12–15
+- Hammer Curl 3×12–15
+- Dips eller Triceps-maskin 3×12–15
+- Laterallyft 3×15
+- Plankan 3×45–60 sek + Russian Twists 3×20
+
+**Dag 6 — Cardio**
+- Löpning eller cykel, 25–30 min, måttlig intensitet
+
+**Dag 7 — Full Body (lätt benfokus, upper/core-tungt)**
+- Rodd (maskin) 3×12–15
+- Hantelpress, stående (axlar) 3×10–12
+- Kabeldrag rak arm (rygg) 3×12–15
+- Goblet Squat 2×12 (lätt underhåll, ej tungt benfokus)
+- Core-cirkel: crunches 3×20, Russian Twists 3×20, Plankan 3×45–60 sek
+
+#### Markus kostplan
+
+| Måltid | Innehåll | Kcal | Protein |
+|---|---|---|---|
+| Frukost | Kvarg 200g + bär + nötter 15g | ~300 | ~26g |
+| Mellanmål 1 | Kvarg 150g + frukt | ~180 | ~16g |
+| Lunch | Proteinkälla 180g + kolhydratkälla 120g + grönsaker | ~560 | ~42g |
+| Mellanmål 2 | Proteinshake eller kvarg 150g | ~160 | ~30g |
+| Middag | Proteinkälla 180g + kolhydratkälla 100g + grönsaker | ~600 | ~42g |
+| **Totalt** | | **~1 800 kcal*** | **~156g** |
+
+*Resterande ~300 kcal täcks av fri variation (extra portion kolhydrat/protein) — lämnat öppet med flit, samma stil som Jonathans "resterande kcal"-not.
 
 ---
 
@@ -304,8 +390,10 @@ Schemalagda pass = gym + cardio. Daily quests räknas ej.
 - Dag 3: **Ben** (Knäböj, Benpress, Rumänsk marklyft, Benböj, Hip Thrust, Stående Calf Raise)
 - Dag 4: **Axlar** (Press, Laterallyft, Face Pulls, Rear Delt Fly)
 
+Detta är Philips split (`BRO_SPLIT`) — används som fallback för scratch-profiler. Jonathan och Markus har egna scheman/pass lagrade i sina presets (`PRESETS.jonathan.workouts` / `PRESETS.markus.workouts`), se deras respektive profilsektioner ovan.
+
 ### TRAIN-fliken — två lägen
-**Normalt läge:** Veckovyn med dag/typ-taggar (GYM / REST). Ej redigerbart. Klickbar rad → detaljpanel.
+**Normalt läge:** Veckovyn med dag/typ-taggar (GYM / CARDIO / REST — `cardio` tillkom i v14 för Markus separata löp-/cykelpass). Ej redigerbart. Klickbar rad → detaljpanel (cardio-dagar visar en "LOG CARDIO"-genväg till Log-fliken).
 
 **Configure-läge** (`[ CONFIGURE ]` → `[ DONE ]`): Flytta om pass, ✏️-ikon per rad för att redigera övningar (namn, sets, reps). Modal med `[ + ADD EXERCISE ]` och `[ SAVE ]`.
 
@@ -542,8 +630,8 @@ Beräknat för Philip — Ectomorph, 73kg, mål: bygga muskler
 Dagsmål: ~3 200 kcal · ~146g protein · ~2.6L vatten
 ```
 
-### Träningsprofil-koppling
-Kostplanen är kopplad till kombinationen **Kroppstyp: Ectomorph + Mål: Bygga muskler**. När profilsystemet byggs ut (Fas 2) ska kostplanen väljas dynamiskt baserat på profil.
+### Träningsprofil-koppling — ✅ IMPLEMENTERAT (v14)
+Kostplanen väljs dynamiskt per profil via `state.kostplanMeals` (fallback: `KOSTPLAN_MEALS`, Philips ursprungliga plan). Ingressen ("Anpassad för [namn] · [vikt] kg · [kroppstyp] · Mål: [mål].") beräknas från `state.name/weight/bodyType/goal` — se "Nytt i v14".
 
 ### Måltidskort (statiska, ej interaktiva)
 
