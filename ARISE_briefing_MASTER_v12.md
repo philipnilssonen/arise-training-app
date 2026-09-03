@@ -1,5 +1,5 @@
 # ARISE — Hunter Training System
-## Master Briefing Document (v14)
+## Master Briefing Document (v15)
 
 > Klistra in detta dokument i en ny Claude Code-session och säg:
 > **"Bygg/uppdatera appen baserat på briefingen nedan. Använd React eller plain HTML/JS, spara så jag kan öppna i webbläsaren."**
@@ -31,6 +31,8 @@
 > - Ny schema-dagstyp `cardio` (separat från `gym`/`rest`) med egen tagg, dag-detaljvy och en "LOG CARDIO"-genväg till Log-fliken — behövdes för Markus separata cardio-pass.
 > - **Icke-destruktiv retrofit:** ny knapp `🔁 SYNC PRESET DATA` (Demo Tools) skriver om profil/nutrition/schema/kostplan från `PRESETS[state.presetKey]` UTAN att röra rank/xp/stats/inventory/gate/loggar. `completeLogin()` backfillar `state.presetKey` från Supabase-radens `preset_key` vid varje inloggning (funkar för profiler skapade före v14, t.ex. Jonathan). Se "Profil 3 — Markus" för hans data samt not om att Jonathans lokala enhet fortfarande behöver en engångs-tryckning på synk-knappen för att gamla sparade fält (vikt/schema/etc) ska uppdateras — helt nya fält (nutritionsmål, kostplan) fylls i automatiskt vid nästa inloggning utan knapptryck.
 > - Öppen punkt löst: aktivitetsmultiplikator-formeln formaliserades INTE till en tabell — istället lagras varje namngiven profils nutritionsmål explicit (ej extrapolerat), vilket är mer robust än att gissa en multiplikator per dagar/vecka.
+>
+> **Nytt i v15:** ✅ **Skill Tree V2 implementerat — gamla 4-skill-systemet helt borttaget.** Iron Body/Endless Runner/Disciplined Mind/Shadow Step (flat XP% per aktivitetstyp) ersatta av 5 nya skills som var och en kroksar in i en annan mekanik: Legendary+ Likelihood (loot-tur, multiplikativ, clampad 100%), Bonus Item Chance (loot-antal), Broad Power (STR/AGI/VIT samtidigt), Discipline (DIS→crit), Streak Damage (bossdamage, kräver ≥2-dagars tränings-streak). Ny cap-formel `min(30, (rank+1)×10)` — E:10/D:20/C+:30. Alla formler enhetstestade mot briefens räkneexempel inklusive clamp-edge-caset (Red Gate S, 78%×1,45=113,1%→100%). Migrering (Alternativ A) körs automatiskt via `loadState()`: gamla spenderade poäng läggs tillbaka i `skillPoints`-poolen, allokering nollställs — verifierat med en simulerad gammal sparfil. Ny tränings-streak (`currentStreakDays`/`lastTrainedDate`, lokalt state) testad end-to-end mot briefens exakta scenario (logga 2 dagar i rad → bonus aktiveras; hoppa över en dag → bonus försvinner), inklusive att `⏱ SIM DAY END` nu driver samma break-check som en riktig dagsväxling. Se ny sektion **"Skill Tree V2"** för fullständig formelspec och flaggade avvikelser (streak/skill-state lokalt istället för Supabase-kolumner; kalenderdag-antagandet för streak är ej omkonfirmerat med Philip).
 >
 > **Referensdokument:** Referera till `ARISE_items_v1.md` för fullständig item-lista. Referera till `ARISE_briefing_items.md` för detaljerad passiv-logik per item. Referera till `ARISE_Fas2_Brief_A_Sonnet_Setup.md` och `ARISE_Fas2_Brief_B_Fable_MultiplayerSync.md` för de ursprungliga implementationsbriefarna om lågnivådetaljer behövs.
 
@@ -324,22 +326,35 @@ finalXP = baseXP × (1 + sumOfAllXPBonuses)
 
 ---
 
-## Skill Tree
+## Skill Tree V2
 
-Spelaren tjänar **1 skill point per level-up** (20 poäng per rank).
+> **Status: ✅ Implementerat (v15).** V1 (Iron Body/Endless Runner/Disciplined Mind/Shadow Step — flat XP% per aktivitetstyp) är helt borttaget ur koden. Full formelspec fanns i `ARISE_Brief_SkillSystemV2.md`; detta är den uppdaterade referensen efter implementation.
 
-### 4 Skills
-| Skill | Ikon | Effekt |
-|---|---|---|
-| Iron Body | 💪 | +5% XP per poäng från gympass |
-| Endless Runner | 🏃 | +5% XP per poäng från cardio |
-| Disciplined Mind | 🥗 | +5% XP per poäng från nutrition check-ins |
-| Shadow Step | ⚡ | +5% XP per poäng från quests |
+Spelaren tjänar fortfarande **1 skill point per level-up**. De 5 nya skillsen kroksar var och en in i en annan spelmekanik istället för att alla dela samma XP%-mall:
+
+| Skill | Ikon | Kroksar in i | Effekt |
+|---|---|---|---|
+| Legendary+ Likelihood | 🍀 | Loot-tur | `legendaryPlusRate(baseRate, pts) = min(1.0, baseRate×(1+pts×0.015))` — multiplikativ bonus på Legendary/Arcane grundraten, clampad vid 100%. Rör INTE pity-räknaren direkt (indirekt påverkan via fler faktiska Leg/Arc-utfall, avsiktligt). |
+| Bonus Item Chance | 🎁 | Loot-antal | `bonusItemChance(0.35, pts) = min(1.0, 0.35+pts×0.01)` — 35%→65% vid 30p. |
+| Broad Power | 💪 | STR/AGI/VIT | `+0.7%/pt` samtidigt på alla tre — pluggar direkt in i `effectiveStat()`, kaskaderar automatiskt till bossdamage/maxHP/allt annat som redan läser den. |
+| Discipline | 🎯 | DIS → crit | `+0.5%/pt` på DIS via samma `effectiveStat()`-mönster, kaskaderar automatiskt in i `critMult()`. |
+| Streak Damage | 🔥 | Bossdamage | `+0.5%/pt`, aktiv endast vid sammanhängande tränings-streak ≥2 kalenderdagar (se "Tränings-streak" nedan). |
 
 ### Poängtak per skill
-- Cap = `(rank_index + 1) × 5`
-- E-rank cap: 5 per skill, S-rank cap: 30 per skill (max)
-- 120 totala poäng, max möjligt är 150 — **du kan aldrig maxa alla 4 skills**
+- Cap = `skillCap(rankIndex) = min(30, (rankIndex+1)×10)` → E:10, D:20, C:30 — därefter fast tak på 30 (B/A/S och framtida ranker ovanför S hanteras redan korrekt av `min(30, …)`, ingen kodändring behövs när fler ranker läggs till).
+- Fri fördelning mellan skills från C-rank och uppåt (inga per-skill-låsningar, bara det gemensamma 30-taket).
+- Total poängbudget: 120 idag (5 skills × 30 cap = 150 max möjligt om budgeten når 150 senare) — **du kan aldrig maxa alla 5 skills** samtidigt som du växer.
+
+### Tränings-streak (`currentStreakDays` / `lastTrainedDate`)
+Lokalt state (localStorage, samma mönster som `weeklyGym`/`lastDate` — synkas aldrig till Supabase, precis som skills aldrig gjorde det innan heller). Räknas som **kalenderdag** (brief-antagandet — ej omkonfirmerat med Philip denna session, flagga om schemalagda dagar var avsett istället):
+- Loggar gym/cardio → `registerTrainingDay()`: samma dag igen = ingen ändring, dagen efter senaste = streak+1, annars streak=1.
+- Vid varje dagsgräns-koll (riktig eller simulerad via `⏱ SIM DAY END`) → `checkStreakBreak()`: om `lastTrainedDate` varken är idag eller igår, nollställ streak till 0.
+- `SIM DAY END`-knappen driver ett dedikerat `streakDemoOffset`-fält (endast för streak-testning) så streak kan testas snabbt utan att vänta på riktiga kalenderdagar.
+
+### Migrering (Alternativ A) — ✅ Körd
+`loadState()` känner igen gamla sparfiler (nyckel `ironBody` finns i `state.skills`) och konverterar automatiskt vid nästa inloggning: alla gamla spenderade poäng (Philip/Jonathan/Markus) läggs tillbaka till `skillPoints` (oförbrukad pool), `skills`-objektet nollställs till de 5 nya nycklarna. Rank/level/xp/stats orörda. Ingen Supabase-migrering behövdes — skill-allokering har aldrig synkats till `profiles`-tabellen (samma sak gäller nu streak-state).
+
+**Avvikelser mot ursprunglig spec:** (1) Streak- och skill-state lagt som lokalt state istället för nya Supabase-kolumner — konsekvent med att skills redan var 100% lokala före V2. (2) Tog samtidigt bort 4 föräldralösa item-passiver (`iron_resolve`, `paralysis_resistance_amulet/pants`, `all_seeing`) som bara drev V1:s XP-bonusar och inte används av något föremål i nuvarande inventory. (3) Drop-odds-koden (`rollRarity` + gate-kortens odds-chip) var duplicerad innan — refaktorerad till en delad `effectiveDropOdds()`-funktion så de två aldrig kan divergera (adresserar buggrisken briefen själv flaggade).
 
 ---
 
@@ -349,11 +364,13 @@ Fyra stats: **STR, AGI, VIT, DIS** — inget hårt tak.
 
 ### Effective Stats
 ```js
-effectiveSTR = player.str + equippedItems.reduce((sum, i) => sum + i.statBonus.str, 0)
-effectiveAGI = player.agi + equippedItems.reduce((sum, i) => sum + i.statBonus.agi, 0)
-effectiveVIT = player.vit + equippedItems.reduce((sum, i) => sum + i.statBonus.vit, 0)
-effectiveDIS = player.dis + equippedItems.reduce((sum, i) => sum + i.statBonus.dis, 0)
+effectiveSTR = applyBroadPower(player.str + itemBonusSTR, broadPowerPoints)
+effectiveAGI = applyBroadPower(player.agi + itemBonusAGI, broadPowerPoints)
+effectiveVIT = applyBroadPower(player.vit + itemBonusVIT, broadPowerPoints)
+effectiveDIS = (player.dis + itemBonusDIS) × (1 + disciplinePoints × 0.005)
+// applyBroadPower(base, pts) = base × (1 + pts × 0.007)
 ```
+Skill Tree V2:s Broad Power/Discipline sitter direkt i denna funktion (`effectiveStat()` i koden) — allt som redan läser effective-stats (bossdamage, max HP, `critMult()`) får bonusen automatiskt utan egen kod.
 
 ### STR, AGI, VIT — rullande counters
 | Stat | Trigger | Tröskel | Vinst |

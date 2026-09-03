@@ -145,6 +145,7 @@ body{
 .session-exercises{font-family:'Barlow Condensed',sans-serif;font-size:12px;color:var(--dim);margin-top:4px;line-height:1.5}
 /* SKILL TREE */
 .skill-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.skill-grid > :last-child:nth-child(odd){grid-column:1/-1}
 .skill-card{background:rgba(0,200,255,.05);border:1px solid var(--border);border-radius:5px;padding:10px;text-align:center;transition:border-color .2s}
 .skill-card.maxed{border-color:rgba(0,229,255,.5)}
 .skill-icon{font-size:24px;margin-bottom:4px}
@@ -1171,8 +1172,13 @@ function defaultState(presetKey) {
     totalXpEarned:0,
     str:0, agi:0, vit:0, dis:0,
     strProgress:0, agiProgress:0, vitProgress:0,
-    skills:{ironBody:0,endlessRunner:0,disciplinedMind:0,shadowStep:0},
+    // Skill Tree V2 (see "SKILL TREE V2" section below) — each skill hooks into
+    // a different system instead of all being flat XP% (that was V1, removed).
+    skills:{legendaryPlus:0, bonusItem:0, broadPower:0, discipline:0, streakDamage:0},
     skillPoints:0,
+    // Streak tracking (Streak Damage skill). Local-only, same pattern as
+    // weeklyGym/lastDate — never synced to Supabase (skills never were either).
+    currentStreakDays: 0, lastTrainedDate: null, streakDemoOffset: 0,
     weeklyGym:0, weeklyCardio:0, weeklyNutritionDays:0,
     weeklyQuestDone:false, critPending:false,
     questDoneToday:false,
@@ -1267,6 +1273,16 @@ function loadState(presetKey) {
         merged.schedule = merged.schedule.map(function(d){
           return d.type === 'quest' ? {day:d.day, type:'rest', workoutIdx:null} : d;
         });
+      }
+      // Migrate old 4-skill system (Iron Body/Endless Runner/Disciplined Mind/Shadow Step)
+      // → Skill Tree V2's 5 skills. Alternativ A: reset allocation to 0, keep the earned
+      // point pool (old spent points flow back into skillPoints so nothing is lost).
+      if(merged.skills && ('ironBody' in merged.skills || 'endlessRunner' in merged.skills || 'disciplinedMind' in merged.skills || 'shadowStep' in merged.skills)) {
+        const oldSpent = (merged.skills.ironBody||0) + (merged.skills.endlessRunner||0) + (merged.skills.disciplinedMind||0) + (merged.skills.shadowStep||0);
+        merged.skillPoints = (merged.skillPoints||0) + oldSpent;
+        merged.skills = {legendaryPlus:0, bonusItem:0, broadPower:0, discipline:0, streakDamage:0};
+      } else {
+        merged.skills = Object.assign({legendaryPlus:0, bonusItem:0, broadPower:0, discipline:0, streakDamage:0}, merged.skills||{});
       }
       if(!merged.gateHistory)    merged.gateHistory   = [];
       if(!merged.pityCounters)   merged.pityCounters  = def.pityCounters;
@@ -1459,33 +1475,87 @@ function dismissNotif() {
 }
 
 // ============================================================
-//  SKILL XP BONUSES
+//  XP FORMULAS
+//  V1 had a skill (Iron Body/Endless Runner/Disciplined Mind/Shadow Step) tied
+//  to each of these giving flat XP%. Skill Tree V2 removed that entirely — the
+//  5 new skills hook into loot/stats/crit/boss-damage instead (see "SKILL TREE
+//  V2" below), so XP is now just the flat rank-based rate, no skill term.
 // ============================================================
-function skillBonus(skillKey) {
-  let pts = state.skills[skillKey];
-  if(hasPassive('all_seeing')) pts += 3;
-  let rate = 0.05;
-  if(skillKey === 'ironBody'      && hasPassive('iron_resolve')) rate = 0.07;
-  return pts * rate;
-}
-
 // Rank-based flat gym XP: E=100, D=150, C=200, B=250, A=275, S=300
 const RANK_GYM_XP = [100, 150, 200, 250, 275, 300];
 function gymXP() {
-  return Math.round(RANK_GYM_XP[state.rank] * (1 + skillBonus('ironBody')));
+  return RANK_GYM_XP[state.rank];
 }
 function cardioXP(km) {
-  let pts = state.skills.endlessRunner;
-  if(hasPassive('all_seeing'))                  pts += 3;
-  if(hasPassive('paralysis_resistance_pants'))  pts += 3;
-  const rate = hasPassive('paralysis_resistance_amulet') ? 0.07 : 0.05;
-  return Math.round(km * 20 * (1 + pts * rate));
+  return Math.round(km * 20);
 }
 function questXP() {
-  return Math.round(75 * (1 + skillBonus('shadowStep')));
+  return 75;
 }
 function nutriXP() {
-  return Math.round(10 * (1 + skillBonus('disciplinedMind')));
+  return 10;
+}
+
+// ============================================================
+//  SKILL TREE V2
+//  5 skills, each hooking into a different system (loot luck, loot count,
+//  broad stats, DIS→crit, streak-gated boss damage) instead of sharing one
+//  XP% template like V1 did. See ARISE_Brief_SkillSystemV2.md.
+// ============================================================
+// Point cap per skill: E:10, D:20, C:30, then flat 30 (B/A/S and beyond —
+// the min(30, …) already handles future ranks above S with no code change).
+function skillCap(rankIndex) {
+  return Math.min(30, (rankIndex + 1) * 10);
+}
+
+// Legendary+ Likelihood — multiplicative bonus on the Legendary/Arcane base
+// rate. Does NOT touch the pity counters directly (pity still counts actual
+// outcomes, so it's affected only indirectly by more Leg/Arc drops landing —
+// intentional, no extra code needed for that).
+function legendaryPlusRate(baseRate, skillPoints) {
+  const bonus = (skillPoints||0) * 0.015; // 1.5%/pt
+  return Math.min(1.0, baseRate * (1 + bonus)); // clamp at 100%
+}
+
+// Bonus Item Chance — additive bump to the guaranteed-extra-item roll.
+function bonusItemChance(baseChance, skillPoints) {
+  return Math.min(1.0, baseChance + (skillPoints||0) * 0.01); // +1pt/pt, additive
+}
+
+// Streak Damage — +0.5%/pt boss damage, only while on a ≥2-day training streak.
+function streakDamageBonus(currentStreakDays, skillPoints) {
+  if((currentStreakDays||0) < 2) return 0;
+  return (skillPoints||0) * 0.005;
+}
+
+// ---- Training streak tracking (Streak Damage skill) ----
+// Local-only state (currentStreakDays/lastTrainedDate/streakDemoOffset), same
+// pattern as weeklyGym/lastDate — never synced to Supabase (skills never were).
+// streakDemoOffset lets the "SIM DAY END" demo button advance a virtual day
+// for testing without waiting on the real calendar (see demo_dayEnd handler).
+function addDaysISO(iso, delta) {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + delta);
+  return d.toISOString().split('T')[0];
+}
+function streakTodayISO() {
+  const d = new Date(Date.now() + (state.streakDemoOffset||0) * 86400000);
+  return d.toISOString().split('T')[0];
+}
+// Call whenever a gym or cardio session is logged.
+function registerTrainingDay() {
+  const t = streakTodayISO();
+  if(state.lastTrainedDate === t) return; // second session same day — no change
+  const yesterday = addDaysISO(t, -1);
+  state.currentStreakDays = (state.lastTrainedDate === yesterday) ? (state.currentStreakDays||0) + 1 : 1;
+  state.lastTrainedDate = t;
+}
+// Call on every day-boundary check (real or simulated) to break a stale streak.
+function checkStreakBreak() {
+  if(!state.lastTrainedDate) { state.currentStreakDays = 0; return; }
+  const t = streakTodayISO();
+  const yesterday = addDaysISO(t, -1);
+  if(state.lastTrainedDate !== t && state.lastTrainedDate !== yesterday) state.currentStreakDays = 0;
 }
 
 // ============================================================
@@ -1502,6 +1572,7 @@ function checkDailyReset() {
     state.todayGymLogged = false;
     state.todayCardioLogged = false;
     state.lastDate = today;
+    checkStreakBreak();
     saveState();
   }
 }
@@ -1516,7 +1587,14 @@ function effectiveStat(key) {
   Object.values(state.equipped || {}).forEach(function(item){
     if(item && item.statBonus && item.statBonus[key]) bonus += item.statBonus[key];
   });
-  return base + bonus;
+  let total = base + bonus;
+  // Skill Tree V2: Broad Power (+0.7%/pt on STR/AGI/VIT simultaneously) and
+  // Discipline (+0.5%/pt on DIS) — cascades automatically into every formula
+  // that already reads effectiveStat (boss dmg, max HP, critMult, etc.).
+  const sk = state.skills || {};
+  if(key === 'str' || key === 'agi' || key === 'vit') total *= (1 + (sk.broadPower||0) * 0.007);
+  else if(key === 'dis') total *= (1 + (sk.discipline||0) * 0.005);
+  return Math.round(total);
 }
 
 function hasPassive(id) {
@@ -1714,19 +1792,36 @@ function gateLog(text, kind) {
 function _pick(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
 function _randInt(lo,hi){ return lo+Math.floor(Math.random()*(hi-lo+1)); }
 
-function rollRarity(gateType) {
-  const b = DROP_RATES[gateType][state.rank]; // [com,rar,leg,arc]
+// Shared by rollRarity() (actual roll) and renderGateOddsHTML() (drop-odds
+// chip on gate cards) so the two can never drift apart — the Legendary+
+// Likelihood skill and its 100% clamp are applied exactly once, here.
+function effectiveDropOdds(gateType) {
+  const raw = DROP_RATES[gateType][state.rank]; // [com,rar,leg,arc], pre-skill
+  const legPts = (state.skills||{}).legendaryPlus || 0;
+  const skillLeg = legendaryPlusRate(raw[2]/100, legPts) * 100;
+  const skillArc = legendaryPlusRate(raw[3]/100, legPts) * 100;
   const pc = state.pityCounters || {};
   const pr = PITY_RATES[gateType];
-  const legBonus = ((pc.legendary||{})[gateType]||0) * pr.legendary;
-  const arcBonus = ((pc.arcane   ||{})[gateType]||0) * pr.arcane;
-  // Apply pity: boost leg/arc, proportionally drain com/rare pool
-  const legW = b[2] + legBonus;
-  const arcW = b[3] + arcBonus;
-  const lowBase = b[0] + b[1];
+  const legPity = ((pc.legendary||{})[gateType]||0);
+  const arcPity = ((pc.arcane   ||{})[gateType]||0);
+  const legBonus = legPity * pr.legendary;
+  const arcBonus = arcPity * pr.arcane;
+  // Apply pity: boost leg/arc (on top of the skill-boosted base), proportionally
+  // drain the com/rare pool — pity math itself is unchanged by the skill.
+  const legW = skillLeg + legBonus;
+  const arcW = skillArc + arcBonus;
+  const lowBase = raw[0] + raw[1];
   const lowW = Math.max(0, lowBase - legBonus - arcBonus);
-  const comRatio = lowBase > 0 ? b[0]/lowBase : 0.5;
-  const weights = [lowW*comRatio, lowW*(1-comRatio), legW, arcW];
+  const comRatio = lowBase > 0 ? raw[0]/lowBase : 0.5;
+  return {
+    weights: [lowW*comRatio, lowW*(1-comRatio), legW, arcW],
+    skillBase: [raw[0], raw[1], skillLeg, skillArc], // post-skill, pre-pity — what the odds chip shows as "base"
+    legBonus, arcBonus, legPity, arcPity,
+  };
+}
+
+function rollRarity(gateType) {
+  const {weights} = effectiveDropOdds(gateType);
   let r = Math.random() * weights.reduce(function(a,c){return a+c;},0);
   const labels = ['common','rare','legendary','arcane'];
   for(let i=0;i<labels.length;i++){ r-=weights[i]; if(r<=0) return labels[i]; }
@@ -1752,13 +1847,15 @@ function generateItem(rarity) {
 }
 
 function rollLoot(gateType) {
-  // Determine item count — guaranteed baseline per gate type + 35% chance of one extra
-  const r = Math.random()*100;
+  // Determine item count — guaranteed baseline per gate type + Bonus Item
+  // Chance skill's shot at one extra (35% base, +1%/pt, clamp 100%).
   let baseline;
   if(gateType==='normal')      baseline = 1;
   else if(gateType==='high')   baseline = 2;
   else                         baseline = 3;
-  const count = baseline + (r<35 ? 1 : 0);
+  const bonusPts = (state.skills||{}).bonusItem || 0;
+  const chance = bonusItemChance(0.35, bonusPts);
+  const count = baseline + (Math.random() < chance ? 1 : 0);
   const items=[];
   for(let i=0;i<count;i++) items.push(generateItem(rollRarity(gateType)));
   return items;
@@ -1902,26 +1999,24 @@ function toggleGateOdds(type) {
 }
 
 function renderGateOddsHTML(gateType) {
-  const base = DROP_RATES[gateType][state.rank]; // [com, rar, leg, arc]
-  const pc   = state.pityCounters || {};
-  const pr   = PITY_RATES[gateType];
-  const legPity = ((pc.legendary||{})[gateType]||0);
-  const arcPity = ((pc.arcane   ||{})[gateType]||0);
-  const legBonus = legPity * pr.legendary;
-  const arcBonus = arcPity * pr.arcane;
-  const hasPity  = legBonus > 0 || arcBonus > 0;
+  // Same source as the actual roll (effectiveDropOdds) — Legendary+ Likelihood's
+  // clamp-at-100% and the skill bonus are guaranteed to match what's rolled.
+  const {weights, skillBase, legBonus, arcBonus, legPity, arcPity} = effectiveDropOdds(gateType);
+  const hasPity = legBonus > 0 || arcBonus > 0;
 
-  // Effective odds (mirrors rollRarity logic)
-  const legEff = base[2] + legBonus;
-  const arcEff = base[3] + arcBonus;
-  const lowBase = base[0] + base[1];
-  const lowEff  = Math.max(0, lowBase - legBonus - arcBonus);
-  const comRatio = lowBase > 0 ? base[0]/lowBase : 0.5;
   const eff = [
-    Math.round(lowEff * comRatio),
-    Math.round(lowEff * (1 - comRatio)),
-    Math.round(legEff),
-    Math.round(arcEff),
+    Math.round(weights[0]),
+    Math.round(weights[1]),
+    Math.round(weights[2]),
+    Math.round(weights[3]),
+  ];
+  // "base" row = post-skill, pre-pity — isolates pity's own contribution,
+  // since the skill bonus is already folded into the headline eff% above.
+  const base = [
+    Math.round(skillBase[0]),
+    Math.round(skillBase[1]),
+    Math.round(skillBase[2]),
+    Math.round(skillBase[3]),
   ];
 
   const rows = [
@@ -2249,7 +2344,7 @@ function renderHome() {
 function renderCharacter() {
   const el = document.getElementById('character-content');
   if(!el) return;
-  const rankCap = (state.rank + 1) * 5;
+  const rankCap = skillCap(state.rank); // E:10, D:20, C:30, then flat 30
   const {calories, protein, water} = calcNutrition();
 
   // --- STATS PANEL ---
@@ -2296,26 +2391,28 @@ function renderCharacter() {
   // --- NUTRITION TARGETS ---
   statsHtml += '<div class="panel"><div class="panel-title">NUTRITION TARGETS</div><div class="info-row"><span class="label">Daily Calories</span><span class="val">'+calories+' kcal</span></div><div class="info-row"><span class="label">Protein</span><span class="val">'+protein+'g</span></div><div class="info-row"><span class="label">Water</span><span class="val">'+water+'L</span></div><div class="info-row"><span class="label">Goal</span><span class="val">'+state.goal+'</span></div></div>';
 
-  // --- SKILL TREE ---
+  // --- SKILL TREE V2 ---
   const skillPts = state.skillPoints;
-  let skillHtml = '<div class="panel"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><div class="panel-title" style="margin:0">SKILL TREE</div><div style="font-size:12px;color:var(--accent);font-weight:700">' + (skillPts>0 ? skillPts+' POINT'+(skillPts>1?'S':'')+' AVAILABLE' : '') + '</div></div><div class="skill-grid">';
-  [{key:'ironBody',icon:'💪',name:'Iron Body',xpLabel:'Gym XP'},{key:'endlessRunner',icon:'🏃',name:'Endless Runner',xpLabel:'Cardio XP'},{key:'disciplinedMind',icon:'🥗',name:'Disciplined Mind',xpLabel:'Nutrition XP'},{key:'shadowStep',icon:'⚡',name:'Shadow Step',xpLabel:'Quest XP'}].forEach(function(s){
-    const pts = state.skills[s.key];
-    // Effective per-point rate for this skill
-    let rate = 0.05;
-    if(s.key === 'ironBody'      && hasPassive('iron_resolve'))               rate = 0.07;
-    if(s.key === 'endlessRunner' && hasPassive('paralysis_resistance_amulet')) rate = 0.07;
-    const rateUpgraded = rate > 0.05;
-    // Effective pts (all_seeing adds 3 to all; pants adds 3 to endlessRunner only)
-    const extraPts = (hasPassive('all_seeing') ? 3 : 0) + (s.key === 'endlessRunner' && hasPassive('paralysis_resistance_pants') ? 3 : 0);
-    const effectivePts = pts + extraPts;
-    const effectiveBonusPct = Math.round(effectivePts * rate * 100);
+  let skillHtml = '<div class="panel"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><div class="panel-title" style="margin:0">SKILL TREE</div><div style="font-size:12px;color:var(--accent);font-weight:700">' + (skillPts>0 ? skillPts+' POINT'+(skillPts>1?'S':'')+' AVAILABLE' : '') + '</div></div><div style="font-size:9px;color:var(--dim);margin-bottom:8px">Cap ' + rankCap + '/skill at ' + RANKS[state.rank] + '-rank (E:10 · D:20 · C+:30)</div><div class="skill-grid">';
+  [
+    {key:'legendaryPlus', icon:'🍀', name:'Legendary+ Likelihood', unit:'Legendary/Arcane rate'},
+    {key:'bonusItem',     icon:'🎁', name:'Bonus Item Chance',     unit:'extra-item chance'},
+    {key:'broadPower',    icon:'💪', name:'Broad Power',           unit:'STR/AGI/VIT'},
+    {key:'discipline',    icon:'🎯', name:'Discipline',            unit:'DIS → crit'},
+    {key:'streakDamage',  icon:'🔥', name:'Streak Damage',         unit:'boss dmg (streak ≥2d)'},
+  ].forEach(function(s){
+    const pts = state.skills[s.key] || 0;
     const maxed = pts >= rankCap, canAdd = !maxed && skillPts > 0, canRemove = pts > 0;
-    const descColor = rateUpgraded ? '#fbbf24' : 'var(--dim)';
-    const extraNote = extraPts > 0 ? ' <span style="color:#fbbf24">(+'+extraPts+' eff.)</span>' : '';
-    const multLabel = (1 + rate).toFixed(2); // e.g. "1.05" or "1.07"
-    const multHtml = rateUpgraded ? '<b style="color:#fbbf24">×'+multLabel+'</b>' : '×'+multLabel;
-    skillHtml += '<div class="skill-card'+(maxed?' maxed':'')+'"><div class="skill-icon">'+s.icon+'</div><div class="skill-name">'+s.name+'</div><div class="skill-pts">'+pts+extraNote+'<span class="skill-pts-sub">/'+rankCap+'</span></div><div style="font-size:10px;color:var(--rank-d);margin-bottom:4px">+'+effectiveBonusPct+'% XP</div><div class="skill-btns"><button class="skill-btn" data-a="skill_dec_'+s.key+'"'+(canRemove?'':' disabled')+'>−</button><button class="skill-btn" data-a="skill_inc_'+s.key+'"'+(canAdd?'':' disabled')+' style="'+(canAdd?'color:var(--accent);border-color:var(--accent)':'')+'">+</button></div><div style="font-size:9px;color:'+descColor+';margin-top:3px">'+s.xpLabel+' '+multHtml+'/pt</div></div>';
+    let effectHtml;
+    if(s.key === 'legendaryPlus')     effectHtml = '+' + (pts*1.5).toFixed(1) + '% ' + s.unit;
+    else if(s.key === 'bonusItem')    effectHtml = '+' + pts + '% ' + s.unit;
+    else if(s.key === 'broadPower')   effectHtml = '+' + (pts*0.7).toFixed(1) + '% ' + s.unit;
+    else if(s.key === 'discipline')   effectHtml = '+' + (pts*0.5).toFixed(1) + '% ' + s.unit;
+    else if(s.key === 'streakDamage') {
+      const active = (state.currentStreakDays||0) >= 2;
+      effectHtml = (active ? '+' + (pts*0.5).toFixed(1) + '%' : '+0% (inactive)') + ' · 🔥' + (state.currentStreakDays||0) + 'd';
+    }
+    skillHtml += '<div class="skill-card'+(maxed?' maxed':'')+'"><div class="skill-icon">'+s.icon+'</div><div class="skill-name">'+s.name+'</div><div class="skill-pts">'+pts+'<span class="skill-pts-sub">/'+rankCap+'</span></div><div style="font-size:10px;color:var(--rank-d);margin-bottom:4px">'+effectHtml+'</div><div class="skill-btns"><button class="skill-btn" data-a="skill_dec_'+s.key+'"'+(canRemove?'':' disabled')+'>−</button><button class="skill-btn" data-a="skill_inc_'+s.key+'"'+(canAdd?'':' disabled')+' style="'+(canAdd?'color:var(--accent);border-color:var(--accent)':'')+'">+</button></div></div>';
   });
   skillHtml += '</div></div>';
 
@@ -2758,6 +2855,9 @@ function _applyGateDmg(actType, label) {
   // Additive damage bonus pool — all % bonuses summed, applied once
   let dmgBonus = 0;
 
+  // Streak Damage skill: +0.5%/pt, only while on a ≥2-day training streak
+  dmgBonus += streakDamageBonus(state.currentStreakDays, (state.skills||{}).streakDamage);
+
   // berserkers_edge: stack increments each session (max 20), +2% per stack
   if(hasPassive('berserkers_edge')) {
     state.berserkerStack = Math.min((state.berserkerStack||0) + 1, 20);
@@ -2806,6 +2906,7 @@ function doLogGym(sessionIdx, dateStr) {
   const wName = BRO_SPLIT[sessionIdx]?.name || 'Gym Session';
   state.weeklyGym++;
   progressStat('gym');
+  registerTrainingDay();
   addXPAndLog(xp, 'gym', wName, dateStr || todayISO());
   _applyGateDmg('gym', 'Gym session');
   showToast(`+${xp} XP — ${wName}`);
@@ -2816,6 +2917,7 @@ function doLogCardio(km, dateStr) {
   let xp = cardioXP(km);
   state.weeklyCardio++;
   progressStat('cardio');
+  registerTrainingDay();
   // Passive: relentless — streak XP bonus (20 per streak week, max +100)
   if(hasPassive('relentless') && (state.relentlessStreak||0) > 0) {
     const bonus = Math.min(state.relentlessStreak * 20, 100);
@@ -3405,7 +3507,7 @@ document.addEventListener('click', function(e) {
   // Skill tree
   else if(a.startsWith('skill_inc_')) {
     const key = a.replace('skill_inc_','');
-    const rankCap = (state.rank + 1) * 5;
+    const rankCap = skillCap(state.rank);
     if(state.skillPoints > 0 && state.skills[key] < rankCap) {
       state.skills[key]++; state.skillPoints--;
       saveState(); renderCharacter(); updateNavSkillBadge();
@@ -3453,8 +3555,12 @@ document.addEventListener('click', function(e) {
     state.nutritionToday = {protein:false, calories:false, water:false};
     state.nutritionDoneToday = false;
     state.questDoneToday = false;
+    // Advance the virtual day used for streak testing, then run the same
+    // break-check a real day-boundary would (see checkDailyReset()).
+    state.streakDemoOffset = (state.streakDemoOffset||0) + 1;
+    checkStreakBreak();
     saveState(); renderHome();
-    showToast('Day reset — nutrition & quest ready again');
+    showToast('Day reset — nutrition & quest ready again' + (state.currentStreakDays === 0 ? ' (streak broken)' : ''));
   }
   else if(a === 'demo_jumpE20') {
     // Calculate XP needed to get to level 20 of current rank
@@ -3479,17 +3585,19 @@ document.addEventListener('click', function(e) {
     const xp = gymXP();
     state.weeklyGym++;
     progressStat('gym');
+    registerTrainingDay();
     addXPAndLog(xp, 'gym', 'Demo Gym Session', todayISO());
     _applyGateDmg('gym', 'Gym session');
-    showToast(`+${xp} XP — Gym (${state.weeklyGym}/${state.daysPerWeek})`);
+    showToast(`+${xp} XP — Gym (${state.weeklyGym}/${state.daysPerWeek}) — 🔥${state.currentStreakDays}d streak`);
   }
   else if(a === 'demo_cardio') {
     const xp = cardioXP(5);
     state.weeklyCardio++;
     progressStat('cardio');
+    registerTrainingDay();
     addXPAndLog(xp, 'cardio', 'Demo 5km run', todayISO());
     _applyGateDmg('cardio', 'Cardio 5km');
-    showToast(`+${xp} XP — Cardio (${state.weeklyCardio}/3)`);
+    showToast(`+${xp} XP — Cardio (${state.weeklyCardio}/3) — 🔥${state.currentStreakDays}d streak`);
   }
   else if(a === 'demo_week')      simulateWeekEnd();
   else if(a === 'demo_startGate') { startGate('normal', 500); switchTab('gates'); }
