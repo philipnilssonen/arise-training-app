@@ -584,6 +584,7 @@ body{
           <button class="btn btn-sm btn-danger" data-a="demo_clearAllInventories" style="grid-column:1/-1">🗑 ONE-TIME: CLEAR ALL INVENTORIES (this device)</button>
           <button class="btn btn-sm" data-a="sendTestPush" style="grid-column:1/-1">🔔 SEND TEST PUSH</button>
           <button class="btn btn-sm" data-a="syncPresetData" style="grid-column:1/-1">🔁 SYNC PRESET DATA</button>
+          <button class="btn btn-sm" data-a="pullSkillCorrection" style="grid-column:1/-1">☁️ PULL FROM CLOUD (skills/streak)</button>
           <button class="btn btn-sm btn-danger" data-a="resetAll" style="grid-column:1/-1">🔄 RESET PROFILE</button>
         </div>
       </div>
@@ -1313,6 +1314,32 @@ function syncPresetData() {
   saveState();
   renderAll();
   showToast('Preset synkad — nutrition, schema & kostplan uppdaterade');
+}
+
+// Pulls skills/streak from the notification_state cloud mirror and applies
+// them locally. Manual, explicit action — that mirror is otherwise write-only
+// (see _pushNotifState), so a correction made remotely via SQL only takes
+// effect once the affected profile taps this button on their own device.
+async function pullSkillCorrection() {
+  const pid = activeProfileId();
+  if(!pid) { showToast('Ingen aktiv profil'); return; }
+  showToast('Hämtar från molnet…');
+  try {
+    const {data, error} = await supa.from('notification_state')
+      .select('skills, skill_points, current_streak_days, last_trained_date')
+      .eq('profile_id', pid).single();
+    if(error) throw error;
+    if(!data) { showToast('Ingen molndata hittades'); return; }
+    if(data.skills) state.skills = Object.assign({legendaryPlus:0, bonusItem:0, broadPower:0, discipline:0, streakDamage:0}, data.skills);
+    if(typeof data.skill_points === 'number') state.skillPoints = data.skill_points;
+    if(typeof data.current_streak_days === 'number') state.currentStreakDays = data.current_streak_days;
+    if(data.last_trained_date) state.lastTrainedDate = data.last_trained_date;
+    saveState();
+    renderAll();
+    showToast('Hämtat från molnet — skills & streak uppdaterade');
+  } catch(e) {
+    showToast('Kunde inte hämta från molnet');
+  }
 }
 
 function saveState() {
@@ -3414,6 +3441,7 @@ document.addEventListener('click', function(e) {
   else if(a === 'saveSettings') saveSettings();
   else if(a === 'resetAll')    { if(confirm('Reset all data?')) { const k = profileStateKey(); const pk = state.presetKey; if(k) localStorage.removeItem(k); state = defaultState(pk); saveState(); renderAll(); } }
   else if(a === 'syncPresetData') syncPresetData();
+  else if(a === 'pullSkillCorrection') pullSkillCorrection();
   else if(a === 'goLogCardio') { switchTab('train'); state.logType = 'cardio'; renderPlan(); renderLog(); }
   else if(a === 'enablePush')  enablePushNotifications();
   else if(a === 'sendTestPush') sendTestPush();
@@ -4242,6 +4270,12 @@ async function _pushNotifState() {
       today_nutrition_done: !!(state.nutritionToday && state.nutritionToday.protein && state.nutritionToday.calories && state.nutritionToday.water),
       skill_points: state.skillPoints || 0,
       last_skill_point_at: state.lastSkillPointTS ? new Date(state.lastSkillPointTS).toISOString() : null,
+      // Cloud mirror (write-only from here — never read back except via the
+      // explicit "PULL FROM CLOUD" action) so a build/streak can be inspected
+      // or corrected remotely if a device is lost or a formula needs fixing.
+      skills: state.skills || null,
+      current_streak_days: state.currentStreakDays || 0,
+      last_trained_date: state.lastTrainedDate || null,
       updated_at: new Date().toISOString()
     }, {onConflict: 'profile_id'});
   } catch(e) {}
