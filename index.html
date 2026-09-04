@@ -335,19 +335,32 @@ body{
 /* BOSS HEADER */
 .boss-header{text-align:center;padding:10px 8px;background:rgba(0,200,255,.04);border:1px solid var(--border);border-radius:5px;margin-bottom:12px}
 .boss-name{font-size:20px;font-weight:700;color:var(--white);margin-bottom:3px}
-/* BOSS FIGURE (illustrated two-layer creature — see BOSS_VISUAL_META) */
+/* BOSS FIGURE (illustrated two-layer creature — see BOSS_VISUAL_META)
+   _upper is the complete figure and breathes; _lower is a static bottom-slice
+   copy of the same artwork pinned to the bottom so the feet stay planted while
+   the torso scales. Both images share a coordinate system, so _lower just
+   bottom-aligns — no per-boss offset. Glow (drop-shadow) sits on _upper ONLY:
+   putting it on the container breaks on iOS Safari when a child animates, and
+   _upper already covers the whole silhouette. _lower's top edge is mask-faded
+   so the mid-body seam never shows and never grows a drop-shadow line. */
 .boss-figure{
-  position:relative;width:82%;max-width:300px;margin:2px auto 10px;
-  filter:
-    hue-rotate(var(--hue,0deg))
-    saturate(var(--sat,1))
-    brightness(var(--bri,1))
-    drop-shadow(0 0 8px var(--gc,var(--accent)))
-    drop-shadow(0 0 18px var(--gc,var(--accent)));
+  position:relative;width:74%;max-width:270px;margin:4px auto 12px;
 }
-.boss-lower,.boss-upper{position:absolute;left:0;top:0;width:100%;display:block}
-.boss-lower{z-index:1}
-.boss-upper{z-index:2;transform-origin:center bottom;animation:boss-breathe 3.6s ease-in-out infinite}
+.boss-lower,.boss-upper{position:absolute;left:0;width:100%;display:block}
+.boss-upper{
+  top:0;z-index:1;transform-origin:center bottom;
+  animation:boss-breathe 3.6s ease-in-out infinite;
+  filter:
+    saturate(var(--sat,1)) brightness(var(--bri,1))
+    drop-shadow(0 0 5px var(--gc,var(--accent)))
+    drop-shadow(0 0 14px var(--gc,var(--accent)));
+}
+.boss-lower{
+  bottom:0;z-index:2;
+  filter:saturate(var(--sat,1)) brightness(var(--bri,1));
+  -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 42%);
+  mask-image:linear-gradient(to bottom,transparent 0,#000 42%);
+}
 @keyframes boss-breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.020)}}
 @media (prefers-reduced-motion:reduce){.boss-upper{animation:none}}
 /* GATE RESULT */
@@ -1029,14 +1042,17 @@ BOSS_NAMES.push(['The Absolute One','Chaos Sovereign','Void God']);
 //  BOSS VISUALS — illustrated two-layer creatures (pilot: 3 E-rank bosses)
 // ============================================================
 // Add a new boss later by dropping <key>_upper.png + <key>_lower.png into
-// assets/bosses/ and adding one BOSS_VISUAL_META entry. No other code changes.
+// assets/bosses/ and adding one BOSS_VISUAL_META entry (natural px size of the
+// _upper image, for the container aspect-ratio). No other code changes.
 // key = snake_case of the display name in BOSS_NAMES.
+// _upper must be the COMPLETE figure; _lower a bottom-slice copy of the same
+// canvas (same width) — it bottom-aligns, no per-boss offset needed.
 // Swap BOSS_ASSET_BASE to a Supabase Storage public URL later = one-line change.
 const BOSS_ASSET_BASE = 'assets/bosses/';
 const BOSS_VISUAL_META = {
-  iron_troll:      { splitFraction: 0.70 },
-  stone_crawler:   { splitFraction: 0.65 },
-  goblin_warchief: { splitFraction: 0.68 },
+  iron_troll:      { w: 898, h: 694 },
+  stone_crawler:   { w: 880, h: 563 },
+  goblin_warchief: { w: 791, h: 678 },
 };
 function bossVisualKey(displayName) {
   return String(displayName || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
@@ -1044,31 +1060,20 @@ function bossVisualKey(displayName) {
 function bossVisualMeta(displayName) {
   const key = bossVisualKey(displayName);
   const m = BOSS_VISUAL_META[key];
-  return m ? { key: key, splitFraction: m.splitFraction } : null;
+  return m ? { key: key, w: m.w, h: m.h } : null;
 }
-// Gate-type -> CSS filter vars for the shared boss-figure container.
+// Gate-type -> per-image CSS vars. The coloured glow (--gc) carries the gate
+// identity; the body stays close to its natural colour (no hue-rotate — it
+// turned the metal creatures green).
 const BOSS_GATE_FX = {
-  normal: { hue: '0deg',   sat: '1',   bri: '1',    gc: '#00e5ff' },
-  high:   { hue: '-40deg', sat: '1.3', bri: '1.05', gc: '#b967ff' },
-  red:    { hue: '120deg', sat: '1.4', bri: '1.1',  gc: '#ff3355' },
+  normal: { sat: '1',    bri: '1',    gc: '#00e5ff' },
+  high:   { sat: '1.15', bri: '1.03', gc: '#b06bff' },
+  red:    { sat: '1.2',  bri: '1.06', gc: '#ff3344' },
 };
 
 // Persistent figure cache so re-renders of the fight panel (realtime HP updates,
 // tab revisits) don't restart the breathing animation or re-download images.
 let _bossFigure = { key: null, node: null, failed: false };
-
-function _positionBossFigure(fig) {
-  const upper = fig.querySelector('.boss-upper');
-  const lower = fig.querySelector('.boss-lower');
-  if(!upper || !lower || !upper.complete || !lower.complete) return;
-  const w = fig.clientWidth;
-  if(!w || !upper.naturalWidth || !lower.naturalWidth) return;
-  const upperH = w * upper.naturalHeight / upper.naturalWidth;
-  const lowerH = w * lower.naturalHeight / lower.naturalWidth;
-  const splitPx = (parseFloat(fig.dataset.splitFraction) || 0.68) * upperH;
-  lower.style.top = splitPx + 'px';
-  fig.style.height = Math.max(upperH, splitPx + lowerH) + 'px';
-}
 
 function buildBossFigure(bossName, gateType) {
   const meta = bossVisualMeta(bossName);
@@ -1076,8 +1081,10 @@ function buildBossFigure(bossName, gateType) {
   const fx = BOSS_GATE_FX[gateType] || BOSS_GATE_FX.normal;
   const fig = document.createElement('div');
   fig.className = 'boss-figure';
-  fig.dataset.splitFraction = meta.splitFraction;
-  fig.style.cssText = '--hue:' + fx.hue + ';--sat:' + fx.sat + ';--bri:' + fx.bri + ';--gc:' + fx.gc;
+  // aspect-ratio from the _upper size fixes the box height from frame 1 (no JS
+  // measuring, no 0-height flash); absolute children fill it, _lower pinned bottom.
+  fig.style.cssText = 'aspect-ratio:' + meta.w + '/' + meta.h +
+    ';--sat:' + fx.sat + ';--bri:' + fx.bri + ';--gc:' + fx.gc;
   const lower = document.createElement('img');
   lower.className = 'boss-lower'; lower.alt = '';
   const upper = document.createElement('img');
@@ -1089,17 +1096,9 @@ function buildBossFigure(bossName, gateType) {
     _bossFigure.node = null;
   }
   lower.onerror = onErr; upper.onerror = onErr;
-  const reflow = function(){ _positionBossFigure(fig); };
-  lower.onload = reflow; upper.onload = reflow;
   lower.src = BOSS_ASSET_BASE + meta.key + '_lower.png';
   upper.src = BOSS_ASSET_BASE + meta.key + '_upper.png';
-  fig.appendChild(lower); fig.appendChild(upper);
-  if(window.ResizeObserver){
-    const ro = new ResizeObserver(reflow);
-    ro.observe(fig);
-  } else {
-    window.addEventListener('resize', reflow);
-  }
+  fig.appendChild(upper); fig.appendChild(lower);
   return fig;
 }
 
@@ -1119,7 +1118,6 @@ function mountBossFigure(bossName, gateType) {
     mount.innerHTML = '';
     mount.appendChild(_bossFigure.node);
   }
-  requestAnimationFrame(function(){ _positionBossFigure(_bossFigure.node); });
 }
 
 const DEFAULT_SCHEDULE = [
