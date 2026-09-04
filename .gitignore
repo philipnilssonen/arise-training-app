@@ -1,0 +1,7 @@
+.DS_Store
+**/.DS_Store
+.claude/settings.local.json
+
+# Raw, uncompressed boss art drops — staging only.
+# Shipped (compressed) copies live in assets/bosses/. Keep originals backed up elsewhere.
+Boss Visuals/
