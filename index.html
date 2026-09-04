@@ -350,7 +350,21 @@ body{
    inflated 1/9 taller than _upper's natural ratio (BUFFER_PCT below), giving
    real empty space under the feet for the shadow to bleed into on every
    engine; _lower (and _upper) anchor to BUFFER_PCT from the bottom, which is
-   _upper's TRUE bottom edge, not the padded box edge. */
+   _upper's TRUE bottom edge, not the padded box edge. DO NOT touch this
+   bottom-% anchoring again without re-checking the iOS glow fix above it —
+   confirmed by device measurement (2nd bug round) that upper/lower stay
+   pixel-flush at the bottom in every state, including mid-breath.
+   Seam fix (device-verified, 3rd bug round): _lower is meant to be a byte-
+   identical duplicate of _upper's own bottom slice, but the two PNGs were
+   compressed independently (separate pngquant passes) and are NOT pixel-
+   identical at the row where they meet — confirmed visible even with the
+   breathing animation frozen at scale(1), i.e. not a positioning or
+   animation-timing issue. _lower's top edge is mask-faded so the switch from
+   "_upper's version" to "_lower's version" of that content is gradual, not a
+   hard line. Mask uses white (not black) opaque stops — -webkit-mask-image on
+   older WebKit reads gradients as luminance (black = hidden), Chromium reads
+   alpha (any RGB with alpha=1 = fully shown); white is fully opaque under
+   both interpretations, black is opaque only under the alpha one. */
 .boss-figure{
   position:relative;width:74%;max-width:270px;margin:4px auto 12px;
   overflow:visible;
@@ -367,6 +381,8 @@ body{
 .boss-lower{
   bottom:10%;z-index:2;
   filter:saturate(var(--sat,1)) brightness(var(--bri,1));
+  -webkit-mask-image:linear-gradient(to bottom,transparent 0,white 38%);
+  mask-image:linear-gradient(to bottom,transparent 0,white 38%);
 }
 @keyframes boss-breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.020)}}
 @media (prefers-reduced-motion:reduce){.boss-upper{animation:none}}
