@@ -333,22 +333,31 @@ body{
 .hit-entry.dmg-dealt{color:#34d399}
 .hit-entry.dmg-recv{color:#ef4444}
 /* BOSS HEADER */
-.boss-header{text-align:center;padding:10px 8px;background:rgba(0,200,255,.04);border:1px solid var(--border);border-radius:5px;margin-bottom:12px}
+.boss-header{text-align:center;padding:10px 8px;background:rgba(0,200,255,.04);border:1px solid var(--border);border-radius:5px;margin-bottom:12px;overflow:visible}
 .boss-name{font-size:20px;font-weight:700;color:var(--white);margin-bottom:3px}
 /* BOSS FIGURE (illustrated two-layer creature — see BOSS_VISUAL_META)
    _upper is the complete figure and breathes; _lower is a static bottom-slice
-   copy of the same artwork pinned to the bottom so the feet stay planted while
-   the torso scales. Both images share a coordinate system, so _lower just
-   bottom-aligns — no per-boss offset. Glow (drop-shadow) sits on _upper ONLY:
-   putting it on the container breaks on iOS Safari when a child animates, and
-   _upper already covers the whole silhouette. _lower's top edge is mask-faded
-   so the mid-body seam never shows and never grows a drop-shadow line. */
+   copy of the same artwork pinned near the bottom so the feet stay planted
+   while the torso scales. Both images share a coordinate system, so _lower
+   just aligns to a fixed % — no per-boss offset. Glow (drop-shadow) sits on
+   _upper ONLY: putting it on the container breaks on iOS Safari when a child
+   animates, and _upper already covers the whole silhouette.
+   iOS Safari fix (device-verified bug): _upper's artwork touches the bottom
+   edge of its own canvas with no transparent margin (feet), and WebKit clips
+   filter/drop-shadow bleed to the box it's rendered in — visible as a hard
+   flat line under the feet, while top/left/right look fine because THOSE PNG
+   edges already have transparent padding baked in. Fix: the container is
+   inflated 1/9 taller than _upper's natural ratio (BUFFER_PCT below), giving
+   real empty space under the feet for the shadow to bleed into on every
+   engine; _lower (and _upper) anchor to BUFFER_PCT from the bottom, which is
+   _upper's TRUE bottom edge, not the padded box edge. */
 .boss-figure{
   position:relative;width:74%;max-width:270px;margin:4px auto 12px;
+  overflow:visible;
 }
 .boss-lower,.boss-upper{position:absolute;left:0;width:100%;display:block}
 .boss-upper{
-  top:0;z-index:1;transform-origin:center bottom;
+  bottom:10%;z-index:1;transform-origin:center bottom;
   animation:boss-breathe 3.6s ease-in-out infinite;
   filter:
     saturate(var(--sat,1)) brightness(var(--bri,1))
@@ -356,10 +365,8 @@ body{
     drop-shadow(0 0 14px var(--gc,var(--accent)));
 }
 .boss-lower{
-  bottom:0;z-index:2;
+  bottom:10%;z-index:2;
   filter:saturate(var(--sat,1)) brightness(var(--bri,1));
-  -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 42%);
-  mask-image:linear-gradient(to bottom,transparent 0,#000 42%);
 }
 @keyframes boss-breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.020)}}
 @media (prefers-reduced-motion:reduce){.boss-upper{animation:none}}
@@ -1075,15 +1082,22 @@ const BOSS_GATE_FX = {
 // tab revisits) don't restart the breathing animation or re-download images.
 let _bossFigure = { key: null, node: null, failed: false };
 
+// Container is inflated 1/9 taller than _upper's true ratio, giving a 10%-tall
+// strip of real empty space below the feet — see the .boss-figure CSS comment
+// for why (iOS clips filter/drop-shadow bleed where the artwork has no
+// transparent margin of its own, i.e. right at the feet).
+const BOSS_FIGURE_BUFFER = 1 / 9;
+
 function buildBossFigure(bossName, gateType) {
   const meta = bossVisualMeta(bossName);
   if(!meta) return null;
   const fx = BOSS_GATE_FX[gateType] || BOSS_GATE_FX.normal;
   const fig = document.createElement('div');
   fig.className = 'boss-figure';
-  // aspect-ratio from the _upper size fixes the box height from frame 1 (no JS
-  // measuring, no 0-height flash); absolute children fill it, _lower pinned bottom.
-  fig.style.cssText = 'aspect-ratio:' + meta.w + '/' + meta.h +
+  // aspect-ratio from the (inflated) _upper size fixes the box height from
+  // frame 1 (no JS measuring, no 0-height flash); absolute children fill it,
+  // both anchored to the same bottom % (see CSS) so they stay flush together.
+  fig.style.cssText = 'aspect-ratio:' + meta.w + '/' + (meta.h * (1 + BOSS_FIGURE_BUFFER)) +
     ';--sat:' + fx.sat + ';--bri:' + fx.bri + ';--gc:' + fx.gc;
   const lower = document.createElement('img');
   lower.className = 'boss-lower'; lower.alt = '';
