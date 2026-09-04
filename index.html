@@ -167,12 +167,14 @@ body{
 .day-card.gym-day{border-left:3px solid var(--accent)}
 .day-card.quest-day{border-left:3px solid var(--rank-d)}
 .day-card.cardio-day{border-left:3px solid #34d399}
+.day-card.mixed-day{border-left:3px solid #fb923c}
 .day-card.rest-day{border-left:3px solid var(--border);opacity:.6}
 .day-name{font-size:12px;font-weight:700;letter-spacing:1px;color:var(--dim);width:32px}
 .day-tag{font-size:9px;font-weight:700;letter-spacing:2px;padding:2px 6px;border-radius:2px;flex-shrink:0}
 .tag-gym{background:rgba(0,229,255,.15);color:var(--accent);border:1px solid rgba(0,229,255,.3)}
 .tag-quest{background:rgba(52,211,153,.1);color:var(--rank-d);border:1px solid rgba(52,211,153,.3)}
 .tag-cardio{background:rgba(52,211,153,.1);color:#34d399;border:1px solid rgba(52,211,153,.3)}
+.tag-mixed{background:rgba(251,146,60,.1);color:#fb923c;border:1px solid rgba(251,146,60,.3)}
 .tag-rest{background:rgba(255,255,255,.04);color:var(--dim);border:1px solid var(--border)}
 .day-title{flex:1;font-size:14px;font-weight:600;color:var(--light)}
 .day-exercises{font-family:'Barlow Condensed',sans-serif;font-size:11px;color:var(--dim);flex:2}
@@ -616,6 +618,7 @@ body{
         <div class="log-type-tabs">
           <button class="log-type-btn active" data-a="logtype_gym" id="lbtn-gym">💪 GYM</button>
           <button class="log-type-btn" data-a="logtype_cardio" id="lbtn-cardio">🏃 CARDIO</button>
+          <button class="log-type-btn" data-a="logtype_mixed" id="lbtn-mixed">🔀 MIXED</button>
           <button class="log-type-btn" data-a="logtype_quest" id="lbtn-quest">⚡ QUEST</button>
         </div>
         <div id="log-form"></div>
@@ -963,13 +966,21 @@ const BOSS_NAMES = [
 const GATE_VICTORY_XP = [630, 840, 1025, 1200, 1260, 1360];
 // BASE PLAYER DAMAGE (v10) — flat per rank 0-5, no longer split by gate type.
 // All gate-type difficulty now lives in BASE_HP's targetPasses design (see master briefing v10).
+// Balance patch: Cardio and Mixed/Other now deal identical damage to Gym (all = BASE_GYM values).
 const BASE_GYM    = [50, 100, 200, 400, 800, 1600];
-const BASE_CARDIO = [30, 60, 120, 240, 480, 960];
+const BASE_CARDIO = [50, 100, 200, 400, 800, 1600];
+const BASE_MIXED  = [50, 100, 200, 400, 800, 1600];
 const BASE_QUEST  = [20, 40, 80, 160, 320, 640];
-// BASE BOSS DAMAGE PER MISSED SESSION — {gym, other} per gate type
-const BASE_BOSS_DMG = {normal:{gym:15,other:8}, high:{gym:22,other:11}, red:{gym:30,other:15}};
+// BOSS DAMAGE PER MISSED SCHEDULED SESSION (Gym/Cardio/Mixed — NOT Daily Quest).
+// Balance patch: one flat value per gate type (no more gym-vs-other split), scaled
+// by bossMult(bossRankIndex) = 1.3^rankIndex (replaces the old ~flat 2^(idx/100)).
+const BASE_BOSS_MISSED = {normal:20, high:27, red:35};
+function bossMult(rankIndex) { return Math.pow(1.3, rankIndex||0); }
 // BOSS HP TABLE (v10) — BASE_HP[gateType][rank][levelInRank-1], rank 0-5 (E-S), level 1-20.
 // Statically designed via targetPasses formula (master briefing v10) — not computed live.
+// Balance patch: BASE_HP_ALL is a single global multiplier — the one dial to turn
+// for a global HP tweak, instead of rewriting every cell in the table below.
+const BASE_HP_ALL = 0.65;
 const BASE_HP = {
   normal: [
     [500,495,496,491,492,494,495,496,498,499,500,508,516,517,525,533,541,549,565,574],
@@ -1180,8 +1191,11 @@ function defaultState(presetKey) {
     // Streak tracking (Streak Damage skill). Local-only, same pattern as
     // weeklyGym/lastDate — never synced to Supabase (skills never were either).
     currentStreakDays: 0, lastTrainedDate: null, streakDemoOffset: 0,
-    weeklyGym:0, weeklyCardio:0, weeklyNutritionDays:0,
+    weeklyGym:0, weeklyCardio:0, weeklyMixed:0, weeklyNutritionDays:0,
     weeklyQuestDone:false, critPending:false,
+    // Weekly-boundary bookkeeping (balance patch) — lets simulateWeekEnd() run
+    // automatically on a real ISO-week change instead of only via the demo button.
+    lastWeekKey: null,
     questDoneToday:false,
     nutritionToday:{protein:false,calories:false,water:false},
     nutritionDoneToday:false,
@@ -1340,6 +1354,33 @@ async function pullSkillCorrection() {
   } catch(e) {
     showToast('Kunde inte hämta från molnet');
   }
+}
+
+// One-time-reward auto-claim (balance patch, task 7). XP/inventory live only
+// in localStorage, never authoritatively in Supabase, so a reward can't be
+// "granted" by writing to the DB alone — it has to be applied client-side.
+// This checks a `pending_reward` flag on the notification_state mirror at
+// every boot and silently claims it once (no visible button — not a
+// permanent UI feature), then clears the flag so it never re-applies.
+async function checkPendingReward() {
+  const pid = activeProfileId();
+  if(!pid) return;
+  try {
+    const {data, error} = await supa.from('notification_state')
+      .select('pending_reward').eq('profile_id', pid).single();
+    if(error || !data || !data.pending_reward) return;
+    const reward = data.pending_reward;
+    if(reward.xp) addXP(reward.xp);
+    if(Array.isArray(reward.loot) && reward.loot.length) {
+      if(!state.inventory) state.inventory = [];
+      reward.loot.forEach(function(item){ state.inventory.push(item); });
+    }
+    saveState();
+    renderAll();
+    showToast('🎁 Reward claimed: +' + (reward.xp||0) + ' XP' + (reward.loot?.length ? ' · ' + reward.loot.length + ' item' + (reward.loot.length>1?'s':'') : ''));
+    // Clear the flag so it never re-applies (e.g. on next boot, or another device).
+    await supa.from('notification_state').update({pending_reward: null}).eq('profile_id', pid);
+  } catch(e) {}
 }
 
 function saveState() {
@@ -1516,6 +1557,12 @@ function gymXP() {
 function cardioXP(km) {
   return Math.round(km * 20);
 }
+// Mixed/Other has no natural quantity (unlike cardio's km) — flat rank rate,
+// same table as gym (not specified by the balance patch; XP is a separate
+// system from boss-damage, so this is a deliberate, low-risk default).
+function mixedXP() {
+  return RANK_GYM_XP[state.rank];
+}
 function questXP() {
   return 75;
 }
@@ -1604,6 +1651,25 @@ function checkDailyReset() {
   }
 }
 
+// Balance patch: simulateWeekEnd() (DIS gain, perfect-week crit, missed-session
+// boss damage, various passive checks) used to only ever run via the manual
+// "SIM WEEK END" demo button — nothing triggered it on a real week boundary.
+// This makes it real: checked once at boot, same granularity as
+// checkDailyReset(). A single ISO-week transition (however many real weeks
+// were actually skipped) always triggers exactly one simulateWeekEnd() call,
+// same no-pileup behavior as the existing daily check.
+function checkWeeklyReset() {
+  const wk = _isoWeekKey(new Date());
+  if(!state.lastWeekKey) {
+    // First time this field exists on this profile — establish a baseline
+    // without retroactively "punishing" a week that predates this feature.
+    state.lastWeekKey = wk;
+    saveState();
+    return;
+  }
+  if(state.lastWeekKey !== wk) simulateWeekEnd(); // sets state.lastWeekKey itself
+}
+
 // ============================================================
 //  GATE SYSTEM
 // ============================================================
@@ -1643,6 +1709,7 @@ function calcPlayerDmg(actType) {
   const ri = state.rank;
   if(actType === 'gym')    return Math.round(BASE_GYM[ri]    * expMult(effectiveStat('str')));
   if(actType === 'cardio') return Math.round(BASE_CARDIO[ri] * expMult(effectiveStat('agi')));
+  if(actType === 'mixed')  return Math.round(BASE_MIXED[ri]  * expMult((effectiveStat('str')+effectiveStat('agi'))/2));
   if(actType === 'quest')  return Math.round(BASE_QUEST[ri]  * expMult(effectiveStat('vit')));
   return 0;
 }
@@ -1661,7 +1728,7 @@ function calcBossHP(gateType, playerCount) {
   // levelInRank (1-20) snapshotted at gate-start — clamp defensively in case state.level is out of range
   const levelIdx = Math.min(19, Math.max(0, (state.level || 1) - 1));
   const base = BASE_HP[gateType][state.rank][levelIdx];
-  return Math.round(base * (1 + (playerCount - 1) * 0.9));
+  return Math.round(base * BASE_HP_ALL * (1 + (playerCount - 1) * 0.9));
 }
 
 function randomBossName(rank) {
@@ -1792,7 +1859,9 @@ function dealPlayerDamage(baseAmt, reason) {
     _sendGateOp('player', 0, '🛡️ ' + state.name + ': Iron Will — first boss damage absorbed!');
     saveState(); renderGate(); return;
   }
-  let actual = Math.max(1, Math.round(baseAmt * Math.pow(2, (state.gate.bossRankIndex||0) / 100)));
+  // Balance patch: bossMult(idx) = 1.3^idx replaces the old ~flat 2^(idx/100)
+  // (which gave only ~3.5% difference total between E and S rank bosses).
+  let actual = Math.max(1, Math.round(baseAmt * bossMult(state.gate.bossRankIndex||0)));
   // Additive damage reduction pool (applied once before blood_tithe amplifier)
   let dmgReduction = 0;
   if(hasPassive('deaths_reprieve') && state.gate.playerHP < (state.gate.playerMaxHP||100) * 0.25)
@@ -1917,12 +1986,14 @@ function applyGateOutcome(result) {
   unsubscribeGateChannel();
   state.gate.active = false;
   state.gate.result = result;
-  // Cooldown: Victory=none, Timeout=24h, Death/Abandon=72h
+  // Cooldown: Victory=none, Abandon=48h, Death=72h. Timeout removed as a
+  // concept entirely (balance patch) — a gate no longer auto-ends on a
+  // deadline, so there's no third cooldown bucket for it anymore.
   if(result === 'victory') {
     state.gate.cooldownUntil = null;
     state.lastGateVictoryTS = Date.now();
   } else {
-    const cdDays = (result === 'defeat_hp' || result === 'defeat_abandoned') ? 3 : 1;
+    const cdDays = result === 'defeat_abandoned' ? 2 : 3; // defeat_hp, or any unexpected value, defaults to the safer 72h
     const cd = new Date(); cd.setDate(cd.getDate() + cdDays);
     state.gate.cooldownUntil = cd.toISOString().split('T')[0];
   }
@@ -1940,38 +2011,20 @@ function applyGateOutcome(result) {
     const rarityCol = RARITY_COLORS[topRarity];
     showToast('GATE CLEARED! +' + xpBonus + ' XP · ' + loot.length + ' item' + (loot.length>1?'s':'') + ' dropped!');
     addXP(xpBonus);
-  } else if(result === 'defeat_hp') {
-    showToast('Defeated — 72h cooldown.');
+  } else if(result === 'defeat_abandoned') {
+    showToast('Gate abandoned — 48h cooldown.');
   } else {
-    showToast('Time ran out — 24h cooldown.');
+    showToast('Defeated — 72h cooldown.');
   }
-  // Reset all gate-scoped stacks on every gate end (victory, timeout, or death)
+  // Reset all gate-scoped stacks on every gate end (victory, death, or abandon)
   state.berserkerStack = 0; state.voidHungerStack = 0; state.endlessStrideStack = 0;
   state.momentumActive = false;
   gateHistory_push(result, loot);
   saveState(); renderGate(); renderHome();
 }
 
-function checkGateExpiry() {
-  // Timeout avgörs server-side (atomärt, en gång för hela teamet).
-  // Detta triggar bara servern att kolla; utfallet kommer tillbaka via handleGateRow.
-  if(!state.gate || !state.gate.active || !state.gate.gateId) return;
-  if(todayISO() > state.gate.endDate) {
-    const gid = state.gate.gateId;
-    supa.rpc('arise_check_timeout', {p_gate_id: gid})
-      .then(function(){ return supa.from('gate_instances').select('*').eq('id', gid).single(); })
-      .then(function(res){ if(res && res.data) handleGateRow(res.data); })
-      .catch(function(){});
-  }
-}
-
 function isCooldownActive() {
   return !!(state.gate && state.gate.cooldownUntil && todayISO() <= state.gate.cooldownUntil);
-}
-
-function gateDaysRemaining() {
-  if(!state.gate || !state.gate.endDate) return 0;
-  return Math.max(0, Math.ceil((new Date(state.gate.endDate) - new Date()) / 86400000));
 }
 
 function cooldownDaysLeft() {
@@ -2140,11 +2193,11 @@ function renderGateSelect(el) {
           '</div>';
         }
         return gateCard('normal',
-          '<span class="gate-badge blue">🔵 NORMAL GATE</span>',
+          '<span class="gate-badge blue">🔵 BLUE GATE</span>',
           rName + '-Rank Boss', '3 weeks · Same rank',
           '<div style="font-size:18px;font-weight:700;color:var(--accent)">' + nHP + '</div>', '') +
         gateCard('high',
-          '<span class="gate-badge blue">🔵 HIGH-RANK GATE</span>',
+          '<span class="gate-badge blue">🔵 ELITE GATE</span>',
           rName + '-Rank Elite Boss', '3 weeks · One rank above',
           '<div style="font-size:18px;font-weight:700;color:var(--rank-b)">' + hHP + '</div>', '') +
         gateCard('red',
@@ -2157,6 +2210,7 @@ function renderGateSelect(el) {
       const ri = state.rank;
       const gymDmg   = Math.round(BASE_GYM[ri]    * expMult(effectiveStat('str')));
       const cardioDmg= Math.round(BASE_CARDIO[ri]  * expMult(effectiveStat('agi')));
+      const mixedDmg = Math.round(BASE_MIXED[ri]   * expMult((effectiveStat('str')+effectiveStat('agi'))/2));
       const questDmg = Math.round(BASE_QUEST[ri]   * expMult(effectiveStat('vit')));
       const maxHP    = calcPlayerMaxHP();
       const crit     = critMult().toFixed(2);
@@ -2164,10 +2218,11 @@ function renderGateSelect(el) {
         '<div class="panel-title">YOUR STATS (same vs all gate types)</div>' +
         '<div class="info-row"><span class="label">💪 Gym session (STR ' + effectiveStat('str') + ')</span><span class="val" style="color:var(--accent)">' + gymDmg.toLocaleString() + ' dmg</span></div>' +
         '<div class="info-row"><span class="label">🏃 Cardio (AGI ' + effectiveStat('agi') + ')</span><span class="val" style="color:var(--rank-d)">' + cardioDmg.toLocaleString() + ' dmg</span></div>' +
+        '<div class="info-row"><span class="label">🔀 Mixed/Other (STR+AGI)</span><span class="val" style="color:#fb923c">' + mixedDmg.toLocaleString() + ' dmg</span></div>' +
         '<div class="info-row"><span class="label">⚡ Quest (VIT ' + effectiveStat('vit') + ')</span><span class="val" style="color:var(--rank-s)">' + questDmg.toLocaleString() + ' dmg</span></div>' +
         '<div class="info-row"><span class="label">❤️ Player Max HP (VIT)</span><span class="val" style="color:#34d399">' + maxHP + ' HP</span></div>' +
         '<div class="info-row"><span class="label">🎯 Crit ×mult (DIS ' + effectiveStat('dis') + ')</span><span class="val" style="color:#e879f9">×' + crit + '</span></div>' +
-        '<div style="font-size:10px;color:var(--dim);margin-top:6px;font-family:\'Barlow Condensed\',sans-serif">Perfect week (100% gym+cardio) → ⚡ guaranteed crit on next session. Boss deals damage via formula using its rank index.</div>' +
+        '<div style="font-size:10px;color:var(--dim);margin-top:6px;font-family:\'Barlow Condensed\',sans-serif">4 training sessions this week (any mix of gym/cardio/mixed) → +1 DIS and ⚡ guaranteed crit on next session. Boss deals damage via formula using its rank index.</div>' +
       '</div>';
     })() +
     renderGateHistoryHTML();
@@ -2200,12 +2255,11 @@ function renderGateFight(el) {
   const g = state.gate;
   const bossRankLabel = g.bossRankLabel || RANKS[g.bossRank] || 'E';
   const bossCol = bossRankLabel === 'S+' ? '#ff9000' : (RANK_COLORS[bossRankLabel] || 'var(--accent)');
-  const days    = gateDaysRemaining();
   const bossPct = Math.round(g.bossHP / g.bossMaxHP * 100);
   const pMaxHP  = g.playerMaxHP || 100;
   const playerPct = Math.round(g.playerHP / pMaxHP * 100);
   const lowHP   = playerPct <= 30;
-  const typeLabel = g.type === 'red' ? '🔴 RED GATE' : g.type === 'high' ? '🔵 HIGH-RANK GATE' : '🔵 NORMAL GATE';
+  const typeLabel = g.type === 'red' ? '🔴 RED GATE' : g.type === 'high' ? '🔵 ELITE GATE' : '🔵 BLUE GATE';
   const badgeCls  = g.type === 'red' ? 'red' : 'blue';
   const logHtml   = g.hitLog.length === 0
     ? '<div style="color:var(--dim);font-family:\'Barlow Condensed\',sans-serif;font-size:13px;padding:6px 0">No activity yet — log a session to deal damage!</div>'
@@ -2215,7 +2269,6 @@ function renderGateFight(el) {
     '<div class="panel">' +
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">' +
         '<span class="gate-badge ' + badgeCls + '">' + typeLabel + '</span>' +
-        '<span style="font-size:12px;font-weight:700;color:' + (days <= 5 ? '#ef4444' : 'var(--dim)') + '">⏱ ' + days + ' DAY' + (days !== 1 ? 'S' : '') + ' LEFT</span>' +
       '</div>' +
       '<div class="boss-header">' +
         '<div class="boss-name">' + g.bossName + '</div>' +
@@ -2246,8 +2299,7 @@ function renderGateResult(el) {
   const g    = state.gate;
   const won  = g.result === 'victory';
   const cd   = cooldownDaysLeft();
-  const reason = g.result === 'defeat_timer' ? 'Time ran out.'
-    : g.result === 'defeat_abandoned' ? 'The party abandoned the gate.'
+  const reason = g.result === 'defeat_abandoned' ? 'The party abandoned the gate.'
     : 'A party member\'s HP reached 0.';
   const logHtml = g.hitLog.map(function(e){ return '<div class="hit-entry ' + (e.kind === 'recv' ? 'dmg-recv' : 'dmg-dealt') + '">' + e.text + '</div>'; }).join('');
 
@@ -2353,8 +2405,8 @@ function renderHome() {
   if(gatePanel && gateContent) {
     if(state.gate && state.gate.active) {
       gatePanel.style.display = 'block';
-      const g = state.gate, bR = RANKS[g.bossRank], bC = RANK_COLORS[bR], days = gateDaysRemaining(), bp = Math.round(g.bossHP/g.bossMaxHP*100);
-      gateContent.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span style="font-size:13px;font-weight:700;color:var(--light)">' + g.bossName + '</span><span style="font-size:11px;font-weight:700;color:' + bC + '">' + bR + '-RANK · ' + days + 'd left</span></div>' +
+      const g = state.gate, bR = RANKS[g.bossRank], bC = RANK_COLORS[bR], bp = Math.round(g.bossHP/g.bossMaxHP*100);
+      gateContent.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span style="font-size:13px;font-weight:700;color:var(--light)">' + g.bossName + '</span><span style="font-size:11px;font-weight:700;color:' + bC + '">' + bR + '-RANK</span></div>' +
         '<div style="font-size:10px;color:var(--dim);margin-bottom:3px">BOSS HP</div><div class="hp-bar-outer" style="height:8px;margin-bottom:6px"><div class="hp-bar-inner hp-boss" style="width:' + bp + '%"></div></div>' +
         '<div style="font-size:10px;color:var(--dim);margin-bottom:3px">PLAYER HP</div><div class="hp-bar-outer" style="height:8px"><div class="hp-bar-inner ' + (g.playerHP<=(g.playerMaxHP||100)*.3?'hp-player-low':'hp-player') + '" style="width:' + Math.round(g.playerHP/(g.playerMaxHP||100)*100) + '%"></div></div>' +
         ((state.critPending || (state.sovereignCritsLeft||0) > 0) ? '<div style="font-size:10px;color:#e879f9;margin-top:4px">⚡ CRIT READY' + ((state.sovereignCritsLeft||0)>1?' ×'+state.sovereignCritsLeft:'') + '</div>' : '');
@@ -2375,17 +2427,18 @@ function renderCharacter() {
   const {calories, protein, water} = calcNutrition();
 
   // --- STATS PANEL ---
-  const totalSched = state.daysPerWeek + 1;
-  const totalDoneW = state.weeklyGym + Math.min(state.weeklyCardio,1);
-  const disPct = totalSched > 0 ? totalDoneW/totalSched : 0;
-  const disHint = disPct >= 1.0 ? '+2 DIS' : disPct >= 0.8 ? '+1 DIS' : '+0 DIS';
-  const disHC   = disPct >= 1.0 ? '#34d399' : disPct >= 0.8 ? '#fbbf24' : 'var(--dim)';
+  // DIS rule (balance patch, simplified): 4 training sessions this week, any
+  // mix of gym/cardio/mixed, = +1 DIS. No more schedule-percentage math.
+  const DIS_SESSION_GOAL = 4;
+  const totalDoneW = state.weeklyGym + state.weeklyCardio + (state.weeklyMixed||0);
+  const disHint = totalDoneW >= DIS_SESSION_GOAL ? '+1 DIS' : '+0 DIS';
+  const disHC   = totalDoneW >= DIS_SESSION_GOAL ? '#34d399' : 'var(--dim)';
   const sp = state.strProgress||0, ap = state.agiProgress||0, vp = state.vitProgress||0;
   const statDefs = [
     {key:'str',icon:'💪',color:'#60a5fa',label:'STR',weekly:sp, goal:3,         hint:'gym → +2 STR', hintColor:sp>=2?'#fbbf24':'var(--dim)'},
     {key:'agi',icon:'⚡',color:'#34d399',label:'AGI',weekly:ap, goal:2,         hint:'cardio → +2 AGI', hintColor:ap>=1?'#fbbf24':'var(--dim)'},
     {key:'vit',icon:'❤️',color:'#ef4444',label:'VIT',weekly:vp, goal:3,         hint:'nutrition → +1 VIT', hintColor:vp>=2?'#fbbf24':'var(--dim)'},
-    {key:'dis',icon:'🎯',color:'#e879f9',label:'DIS',weekly:totalDoneW, goal:totalSched, hint:disHint, hintColor:disHC},
+    {key:'dis',icon:'🎯',color:'#e879f9',label:'DIS',weekly:Math.min(totalDoneW,DIS_SESSION_GOAL), goal:DIS_SESSION_GOAL, hint:disHint, hintColor:disHC},
   ];
   let statsHtml = '<div class="panel"><div class="panel-title">ATTRIBUTES <span style="font-size:9px;color:var(--dim);letter-spacing:0;font-weight:400">— no hard cap</span></div>';
   statDefs.forEach(function(s){
@@ -2407,7 +2460,7 @@ function renderCharacter() {
     {label:'STR', cur:sp, goal:3,         txt:sp+'/3 gym → +2 STR'},
     {label:'AGI', cur:ap, goal:2,         txt:ap+'/2 cardio → +2 AGI'},
     {label:'VIT', cur:vp, goal:3,         txt:vp+'/3 nutrition → +1 VIT'},
-    {label:'DIS', cur:totalDoneW, goal:totalSched, txt:totalDoneW+'/'+totalSched+' this week → '+disHint},
+    {label:'DIS', cur:Math.min(totalDoneW,DIS_SESSION_GOAL), goal:DIS_SESSION_GOAL, txt:totalDoneW+'/'+DIS_SESSION_GOAL+' sessions this week → '+disHint},
   ];
   weekStatDefs.forEach(function(r){
     let dots=''; for(let i=0;i<r.goal;i++) dots+='<div class="week-dot'+(i<r.cur?' done':'')+'"></div>';
@@ -2530,6 +2583,13 @@ function renderTodaySession() {
       <div class="session-exercises">25–30 min, måttlig intensitet.</div>
       <div style="margin-top:10px"><button class="btn btn-sm" style="width:100%" data-a="goLogCardio">LOG CARDIO</button></div>
     </div>`;
+  } else if(sched.type === 'mixed') {
+    el.innerHTML = `<div class="session-card">
+      <div class="session-type" style="color:#fb923c">MIXED/OTHER</div>
+      <div class="session-name">Sport, hike, circuit...</div>
+      <div class="session-exercises">Anything that isn't clearly gym or cardio.</div>
+      <div style="margin-top:10px"><button class="btn btn-sm" style="width:100%" data-a="goLogMixed">LOG MIXED/OTHER</button></div>
+    </div>`;
   } else if(sched.type === 'quest') {
     const q = QUEST_BY_RANK[state.rank];
     const questExercises = [
@@ -2646,8 +2706,8 @@ function renderPlan() {
   grid.innerHTML = state.schedule.map(function(d, i) {
     const isToday = i === todayIdx;
     const isSelected = configMode && swapSelected === i;
-    const typeClass = d.type==='gym'?'gym-day':d.type==='quest'?'quest-day':d.type==='cardio'?'cardio-day':'rest-day';
-    const tagHtml  = d.type==='gym'?'<span class="day-tag tag-gym">GYM</span>':d.type==='quest'?'<span class="day-tag tag-quest">QUEST</span>':d.type==='cardio'?'<span class="day-tag tag-cardio">CARDIO</span>':'<span class="day-tag tag-rest">REST</span>';
+    const typeClass = d.type==='gym'?'gym-day':d.type==='quest'?'quest-day':d.type==='cardio'?'cardio-day':d.type==='mixed'?'mixed-day':'rest-day';
+    const tagHtml  = d.type==='gym'?'<span class="day-tag tag-gym">GYM</span>':d.type==='quest'?'<span class="day-tag tag-quest">QUEST</span>':d.type==='cardio'?'<span class="day-tag tag-cardio">CARDIO</span>':d.type==='mixed'?'<span class="day-tag tag-mixed">MIXED</span>':'<span class="day-tag tag-rest">REST</span>';
 
     let title='Rest Day', exercises='';
     if(d.type==='gym' && d.workoutIdx!==null) {
@@ -2658,6 +2718,8 @@ function renderPlan() {
       const q=QUEST_BY_RANK[state.rank]; title='Daily Quest'; exercises=q.reps+'× push-ups, sit-ups, squats, lunges';
     } else if(d.type==='cardio') {
       title='Cardio'; exercises='Löpning eller cykel, 25–30 min';
+    } else if(d.type==='mixed') {
+      title='Mixed/Other'; exercises='Sport, hike, circuit — anything non-gym/cardio';
     }
 
     // In configure mode: swap on card click + ✏️ for gym days
@@ -2699,7 +2761,7 @@ function renderLogForm() {
   const el = document.getElementById('log-form');
   const type = state.logType || 'gym';
 
-  ['lbtn-gym','lbtn-cardio','lbtn-quest'].forEach(id => {
+  ['lbtn-gym','lbtn-cardio','lbtn-mixed','lbtn-quest'].forEach(id => {
     document.getElementById(id).classList.remove('active');
   });
   document.getElementById(`lbtn-${type}`).classList.add('active');
@@ -2738,6 +2800,22 @@ function renderLogForm() {
       </div>
       <button class="btn" style="width:100%;margin-top:4px" data-a="logCardio">LOG CARDIO SESSION</button>
     `;
+  } else if(type === 'mixed') {
+    el.innerHTML = `
+      <div class="form-group" style="background:rgba(251,146,60,.05);border:1px solid rgba(251,146,60,.2);border-radius:4px;padding:10px">
+        <div style="font-size:11px;color:#fb923c;font-weight:700;letter-spacing:1px">MIXED/OTHER SESSION</div>
+        <div style="font-size:11px;color:var(--dim);margin-top:4px;font-family:'Barlow Condensed',sans-serif">Anything that's not clearly gym or cardio — sports, hikes, circuit training, etc. Counts as half a gym + half a cardio session toward STR/AGI.</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Date</label>
+        <input class="form-input" id="log-date" type="date" value="${todayISO()}">
+      </div>
+      <div class="form-group" style="background:rgba(0,229,255,.05);border:1px solid var(--border);border-radius:4px;padding:10px;text-align:center">
+        <div style="font-size:11px;color:var(--dim)">XP REWARD</div>
+        <div style="font-size:24px;font-weight:700;color:#fb923c">+${mixedXP()} XP</div>
+      </div>
+      <button class="btn" style="width:100%;margin-top:4px" data-a="logMixed">LOG MIXED/OTHER SESSION</button>
+    `;
   } else if(type === 'quest') {
     const q = QUEST_BY_RANK[state.rank];
     el.innerHTML = `
@@ -2771,8 +2849,8 @@ function renderLogHistory() {
   }
   const sorted = [...state.logs].reverse().slice(0, 30);
   el.innerHTML = sorted.map(log => {
-    const typeLabel = log.type === 'gym' ? 'GYM' : log.type === 'cardio' ? 'CARDIO' : 'QUEST';
-    const typeColor = log.type === 'gym' ? 'var(--accent)' : log.type === 'cardio' ? '#34d399' : '#fbbf24';
+    const typeLabel = log.type === 'gym' ? 'GYM' : log.type === 'cardio' ? 'CARDIO' : log.type === 'mixed' ? 'MIXED' : log.type === 'salvage' ? 'SALVAGE' : 'QUEST';
+    const typeColor = log.type === 'gym' ? 'var(--accent)' : log.type === 'cardio' ? '#34d399' : log.type === 'mixed' ? '#fb923c' : log.type === 'salvage' ? '#9ca3af' : '#fbbf24';
     return `<div class="log-entry">
       <div class="log-entry-left">
         <div class="log-entry-type" style="color:${typeColor}">${typeLabel}</div>
@@ -2863,6 +2941,7 @@ function _applyGateDmg(actType, label) {
   let dmg = 0;
   if(actType === 'gym')    dmg = Math.round(BASE_GYM[ri]    * expMult(effectiveStat('str')));
   else if(actType === 'cardio') dmg = Math.round(BASE_CARDIO[ri] * expMult(effectiveStat('agi')));
+  else if(actType === 'mixed')  dmg = Math.round(BASE_MIXED[ri]  * expMult((effectiveStat('str')+effectiveStat('agi'))/2));
   else if(actType === 'quest')  dmg = Math.round(BASE_QUEST[ri]  * expMult(effectiveStat('vit')));
   if(!dmg) return;
 
@@ -2922,6 +3001,13 @@ function progressStat(type) {
   } else if(type === 'cardio') {
     state.agiProgress = (state.agiProgress||0) + 1;
     if(state.agiProgress >= 2) { state.agi = (state.agi||0) + 2; state.agiProgress = 0; showToast('AGI +2 ↑'); }
+  } else if(type === 'mixed') {
+    // Mixed/Other counts as half a gym session AND half a cardio session
+    // toward the STR/AGI counters (50/50 hybrid, per balance patch).
+    state.strProgress = (state.strProgress||0) + 0.5;
+    if(state.strProgress >= 3) { state.str = (state.str||0) + 2; state.strProgress -= 3; showToast('STR +2 ↑'); }
+    state.agiProgress = (state.agiProgress||0) + 0.5;
+    if(state.agiProgress >= 2) { state.agi = (state.agi||0) + 2; state.agiProgress -= 2; showToast('AGI +2 ↑'); }
   } else if(type === 'nutrition') {
     state.vitProgress = (state.vitProgress||0) + 1;
     if(state.vitProgress >= 3) { state.vit = (state.vit||0) + 1; state.vitProgress = 0; showToast('VIT +1 ↑'); }
@@ -2953,6 +3039,16 @@ function doLogCardio(km, dateStr) {
   addXPAndLog(xp, 'cardio', `${km}km run`, dateStr || todayISO());
   _applyGateDmg('cardio', `Cardio ${km}km`);
   showToast(`+${xp} XP — ${km}km cardio`);
+}
+
+function doLogMixed(dateStr) {
+  const xp = mixedXP();
+  state.weeklyMixed = (state.weeklyMixed||0) + 1;
+  progressStat('mixed');
+  registerTrainingDay(); // counts toward the Streak Damage skill, same as gym/cardio
+  addXPAndLog(xp, 'mixed', 'Mixed/Other session', dateStr || todayISO());
+  _applyGateDmg('mixed', 'Mixed/Other session');
+  showToast(`+${xp} XP — Mixed/Other session`);
 }
 
 function doLogQuest(dateStr) {
@@ -3013,13 +3109,17 @@ function toggleNutri(key) {
 }
 
 function simulateWeekEnd() {
+  // Mark this ISO week as processed so the automatic weekly-boundary check
+  // (checkWeeklyReset) doesn't re-trigger this same week, regardless of
+  // whether this run came from that check or the SIM WEEK END demo button.
+  state.lastWeekKey = _isoWeekKey(new Date());
+
   // STR/AGI/VIT update via rolling counters — not here
-  // DIS: scheduled = gym days + 1 cardio
-  const totalScheduled = state.daysPerWeek + 1;
-  const totalDone      = state.weeklyGym + Math.min(state.weeklyCardio, 1);
-  const disPct = totalScheduled > 0 ? totalDone / totalScheduled : 0;
-  const perfectWeek = totalDone >= totalScheduled;
-  let disGain = disPct >= 1.0 ? 2 : disPct >= 0.8 ? 1 : 0;
+  // DIS (balance patch, simplified): 4 training sessions this week, any mix
+  // of gym/cardio/mixed, = +1 DIS. Replaces the old schedule-percentage math.
+  const totalDone = state.weeklyGym + state.weeklyCardio + (state.weeklyMixed||0);
+  const perfectWeek = totalDone >= 4;
+  let disGain = perfectWeek ? 1 : 0;
 
   // --- PASSIVE: unyielding / unbreakable — extra DIS on perfect week ---
   if(perfectWeek && hasPassive('unyielding'))   disGain++;
@@ -3081,19 +3181,31 @@ function simulateWeekEnd() {
   state.weeklyXPGained = 0;
 
   // --- BOSS ATTACKS FOR MISSED SESSIONS ---
+  // Balance patch: one flat damage value per gate type regardless of session
+  // type (gym/cardio/mixed all missed alike), scaled by bossMult(bossRankIndex)
+  // = 1.3^rankIndex. Daily Quest never triggers boss damage (removed).
+  // "Missed" is schedule-accurate: scheduled gym/cardio/mixed days this week
+  // minus what was actually logged, per type (so existing per-type item
+  // curses below keep working — the new formula just made their base damage
+  // type-blind, not the accounting of which type was missed).
   if(state.gate && state.gate.active) {
     const g = state.gate;
-    const missedGym    = Math.max(0, state.daysPerWeek - state.weeklyGym);
-    const missedCardio = state.weeklyCardio === 0 ? 1 : 0;
-    const missedQuest  = state.weeklyQuestDone ? 0 : 1;
-    const bd = BASE_BOSS_DMG[g.type] || BASE_BOSS_DMG.normal;
+    const schedGym    = state.schedule.filter(function(d){return d.type==='gym';}).length;
+    const schedCardio = state.schedule.filter(function(d){return d.type==='cardio';}).length;
+    const schedMixed  = state.schedule.filter(function(d){return d.type==='mixed';}).length;
+    const missedGym    = Math.max(0, schedGym - state.weeklyGym);
+    const missedCardio = Math.max(0, schedCardio - state.weeklyCardio);
+    const missedMixed  = Math.max(0, schedMixed - (state.weeklyMixed||0));
+    const missedBase = BASE_BOSS_MISSED[g.type] || BASE_BOSS_MISSED.normal;
     const bossCritMults = {normal:1.5, high:2.0, red:2.5};
-    const bossCrit = disPct < 0.2;
+    // "Very bad week" (boss crits on missed-session damage): nothing logged at all.
+    const bossCrit = totalDone === 0;
     const bCrit = bossCrit ? (bossCritMults[g.type] || 1) : 1;
+    const missedDmg = Math.round(missedBase * bCrit);
     // OBS: Death avgörs server-side i arise_adjust_player_hp — extra ops efter att
     // gaten stängts är no-ops på servern, så loopen behöver inte breaka lokalt.
     for(let i = 0; i < missedGym; i++) {
-      dealPlayerDamage(Math.round(bd.gym * bCrit), 'Missed gym' + (bossCrit ? ' (BOSS CRIT!)' : ''));
+      dealPlayerDamage(missedDmg, 'Missed gym' + (bossCrit ? ' (BOSS CRIT!)' : ''));
       // blood_pact_weapon curse: extra -20 HP per missed gym
       if(hasPassive('blood_pact_weapon') && state.gate && state.gate.active) {
         state.gate.playerHP = Math.max(0, state.gate.playerHP - 20); // optimistisk spegel
@@ -3101,9 +3213,12 @@ function simulateWeekEnd() {
         _sendGateOp('player', -20, '🩸 ' + state.name + ': Blood Pact curse — missed gym');
       }
     }
-    if(missedCardio) {
-      dealPlayerDamage(Math.round(bd.other * bCrit), 'Missed cardio' + (bossCrit ? ' (BOSS CRIT!)' : ''));
-      // quicksilver curse: -10% maxHP per missed cardio
+    if(missedCardio > 0) {
+      for(let i = 0; i < missedCardio; i++) {
+        dealPlayerDamage(missedDmg, 'Missed cardio' + (bossCrit ? ' (BOSS CRIT!)' : ''));
+      }
+      // quicksilver curse: -10% maxHP, once per week (not per missed day —
+      // preserves the original balance of this unrelated item passive)
       if(hasPassive('quicksilver') && state.gate && state.gate.active) {
         const pen = Math.round((state.gate.playerMaxHP||100) * 0.10);
         state.gate.playerHP = Math.max(0, state.gate.playerHP - pen); // optimistisk spegel
@@ -3111,8 +3226,9 @@ function simulateWeekEnd() {
         _sendGateOp('player', -pen, '⚡ ' + state.name + ': Quicksilver curse — missed cardio');
       }
     }
-    if(missedQuest)
-      dealPlayerDamage(Math.round(bd.other * bCrit), 'Missed quest' + (bossCrit ? ' (BOSS CRIT!)' : ''));
+    for(let i = 0; i < missedMixed; i++) {
+      dealPlayerDamage(missedDmg, 'Missed mixed/other' + (bossCrit ? ' (BOSS CRIT!)' : ''));
+    }
     // pact_of_ruin curse: if <5 nutrition days → HP penalty
     if(hasPassive('pact_of_ruin') && state.weeklyNutritionDays < 5 && state.gate && state.gate.active) {
       const pen = Math.round((state.gate.playerMaxHP||100) * 0.08);
@@ -3123,7 +3239,7 @@ function simulateWeekEnd() {
   }
 
   // --- RESET ---
-  state.weeklyGym = 0; state.weeklyCardio = 0;
+  state.weeklyGym = 0; state.weeklyCardio = 0; state.weeklyMixed = 0;
   state.weeklyNutritionDays = 0; state.weeklyQuestDone = false;
   state.nutritionDoneToday = false; state.questDoneToday = false;
   state.nutritionToday = {protein:false, calories:false, water:false};
@@ -3196,9 +3312,13 @@ function handlePlanDay(i) {
   } else if(swapSelected === i) {
     swapSelected = null; renderPlan();
   } else {
-    const tmp = state.schedule[swapSelected];
-    state.schedule[swapSelected] = state.schedule[i];
-    state.schedule[i] = tmp;
+    // Bugfix: swap only the CONTENT (type + workoutIdx), never `day` — the
+    // weekday label is fixed to its array position, only what's scheduled
+    // there should move.
+    const a = state.schedule[swapSelected], b = state.schedule[i];
+    const aType = a.type, aIdx = a.workoutIdx;
+    a.type = b.type; a.workoutIdx = b.workoutIdx;
+    b.type = aType; b.workoutIdx = aIdx;
     swapSelected = null;
     saveState(); renderPlan();
     showToast('Days swapped');
@@ -3231,6 +3351,9 @@ function showDayDetail(i) {
   } else if(d.type==='cardio') {
     html += 'CARDIO</div><div style="font-family:\'Barlow Condensed\',sans-serif;font-size:14px;color:var(--dim);margin-bottom:12px">Löpning eller cykel, 25–30 min, måttlig intensitet.</div>' +
       '<button class="btn btn-sm" data-a="goLogCardio">LOG CARDIO</button>';
+  } else if(d.type==='mixed') {
+    html += 'MIXED/OTHER</div><div style="font-family:\'Barlow Condensed\',sans-serif;font-size:14px;color:var(--dim);margin-bottom:12px">Sport, hike, circuit training — anything that isn\'t clearly gym or cardio.</div>' +
+      '<button class="btn btn-sm" data-a="goLogMixed">LOG MIXED/OTHER</button>';
   } else if(d.type==='quest') {
     const q = QUEST_BY_RANK[state.rank];
     html += 'DAILY QUEST</div><div class="exercise-list">';
@@ -3443,6 +3566,7 @@ document.addEventListener('click', function(e) {
   else if(a === 'syncPresetData') syncPresetData();
   else if(a === 'pullSkillCorrection') pullSkillCorrection();
   else if(a === 'goLogCardio') { switchTab('train'); state.logType = 'cardio'; renderPlan(); renderLog(); }
+  else if(a === 'goLogMixed')  { switchTab('train'); state.logType = 'mixed';  renderPlan(); renderLog(); }
   else if(a === 'enablePush')  enablePushNotifications();
   else if(a === 'sendTestPush') sendTestPush();
 
@@ -3480,6 +3604,7 @@ document.addEventListener('click', function(e) {
 
   else if(a === 'logtype_gym')   { state.logType = 'gym';   renderLog(); }
   else if(a === 'logtype_cardio'){ state.logType = 'cardio'; renderLog(); }
+  else if(a === 'logtype_mixed') { state.logType = 'mixed';  renderLog(); }
   else if(a === 'logtype_quest') { state.logType = 'quest';  renderLog(); }
 
   else if(a === 'logGym') {
@@ -3491,6 +3616,10 @@ document.addEventListener('click', function(e) {
     const km = parseFloat(document.getElementById('log-km')?.value || '0');
     const date = document.getElementById('log-date')?.value || todayISO();
     doLogCardio(km, date);
+  }
+  else if(a === 'logMixed') {
+    const date = document.getElementById('log-date')?.value || todayISO();
+    doLogMixed(date);
   }
   else if(a === 'logQuest') {
     const date = document.getElementById('log-date')?.value || todayISO();
@@ -3565,7 +3694,7 @@ document.addEventListener('click', function(e) {
 
   // Abandon gate — delad övergång: hela teamets gate avslutas, alla klienter ser det via Realtime
   else if(a === 'abandonGate') {
-    if(confirm('Abandon gate? Ends the gate for the whole party — no rewards.')) {
+    if(confirm('Abandon gate? Ends the gate for the whole party — no rewards, 48h cooldown.')) {
       abandonGateShared();
     }
   }
@@ -4642,7 +4771,7 @@ let _gateChannel = null;
 let _partySel = null; // profil-ids valda för nästa gate utöver mig själv
 
 const _STATUS_TO_RESULT = {
-  victory:'victory', timeout:'defeat_timer', death:'defeat_hp', abandoned:'defeat_abandoned'
+  victory:'victory', death:'defeat_hp', abandoned:'defeat_abandoned'
 };
 
 function _uuid() {
@@ -4704,7 +4833,7 @@ function _maybeApplyOutcome(gateId, status) {
     }
     return;
   }
-  applyGateOutcome(_STATUS_TO_RESULT[status] || 'defeat_timer');
+  applyGateOutcome(_STATUS_TO_RESULT[status] || 'defeat_hp');
 }
 
 // Auktoritativt RPC-svar: {boss_current_hp, player_current_hp?, status}.
@@ -4810,20 +4939,13 @@ async function syncLoadActiveGate() {
     let row = (gates || [])[0];
     if(!row) return;
 
-    if(row.status === 'active' && new Date(row.ends_at) < new Date()) {
-      // Server-side timeout-check (atomär — bara en klient "vinner" övergången)
-      await supa.rpc('arise_check_timeout', {p_gate_id: row.id});
-      const {data: re} = await supa.from('gate_instances').select('*').eq('id', row.id).single();
-      if(re) row = re;
-    }
-
     if(row.status === 'active') {
       await _hydrateGate(row);
       renderGate(); renderHome();
     } else if((state.processedGates || []).indexOf(row.id) < 0) {
       // Gaten avslutades medan jag var offline — applicera mitt utfall (loot/XP/cooldown) en gång
       await _hydrateGate(row);
-      applyGateOutcome(_STATUS_TO_RESULT[row.status] || 'defeat_timer');
+      applyGateOutcome(_STATUS_TO_RESULT[row.status] || 'defeat_hp');
     }
   } catch(e) {
     console.warn('Gate sync failed', e);
@@ -4894,7 +5016,7 @@ async function abandonGateShared() {
     if(error) throw error;
     const {data} = await supa.from('gate_instances').select('*').eq('id', gid).single();
     if(data) handleGateRow(data);
-    showToast('Gate abandoned. 3-day cooldown.');
+    showToast('Gate abandoned. 48h cooldown.');
   } catch(e) {
     showToast('⚠️ Kunde inte överge gaten — kontrollera anslutningen');
   }
@@ -4911,12 +5033,15 @@ function bootApp() {
   registerServiceWorker();
   ensureNotifPrefs();
   syncNotifState();
+  checkPendingReward();
   openSessionFromUrlIfRequested();
   // Gate-state hämtas från Supabase efter att UI:t bootats med lokal spegel.
   // Presence-hjärtslaget startas EFTER gate-synken: offline-intjänad XP ska
   // processas medan last_seen_at ännu är gammal, annars gate:as L1/L2 bort.
   syncLoadActiveGate().then(function(){
-    checkGateExpiry();
+    // Runs after gate state is hydrated from the server so missed-session
+    // boss damage (if any) uses the real, current gate — not a stale local mirror.
+    checkWeeklyReset();
     flushPendingGateOps();
     startPresenceHeartbeat();
   });
