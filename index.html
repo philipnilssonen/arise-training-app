@@ -945,7 +945,7 @@ body{
 // Bump on every deploy — must match BUILD_ID in sw.js. Shown in DEMO TOOLS so
 // we can confirm exactly which code version a given device is actually running
 // vs. what's deployed (iOS PWAs cache the shell hard; see sw.js caching notes).
-const BUILD_ID = '2026-09-05T16:05Z';
+const BUILD_ID = '2026-09-05T16:25Z';
 
 const RANKS = ['E','D','C','B','A','S'];
 const RANK_COLORS = {E:'#9ca3af',D:'#34d399',C:'#60a5fa',B:'#c084fc',A:'#fb923c',S:'#fbbf24'};
@@ -2341,6 +2341,7 @@ function applyGateOutcome(result) {
     loot = rollLoot(state.gate.type);
     loot.forEach(function(item){ if(!state.inventory) state.inventory=[]; state.inventory.push(item); syncInventoryAdd(item); });
     updatePityCounters(loot.map(function(i){return i.rarity;}), state.gate.type);
+    syncPityCounters(state.gate.type);
     let xpBonus = GATE_VICTORY_XP[state.rank];
     if(hasPassive('xp_siphon')) xpBonus = Math.round(xpBonus * 1.20);
     const topRarity = loot.reduce(function(best,item){
@@ -4836,6 +4837,22 @@ function syncInventoryUnequip(itemId) {
     .then(function(){}).catch(function(){});
 }
 
+// public.pity_counters mirror — event-based, one row per (profile, gate_type).
+// The no-legendary / no-arcane drop streaks are real loot progression that
+// otherwise lives only in localStorage — the same gap class that reset Philip's
+// profile on 2026-09-05. Written right after updatePityCounters() mutates the
+// affected gate_type; hydrated in completeLogin().
+function syncPityCounters(gateType) {
+  const pid = activeProfileId();
+  if(!pid || !gateType || !state.pityCounters) return;
+  const leg = (state.pityCounters.legendary || {})[gateType] || 0;
+  const arc = (state.pityCounters.arcane || {})[gateType] || 0;
+  supa.from('pity_counters').upsert({
+    profile_id: pid, gate_type: gateType,
+    no_legendary_streak: leg, no_arcane_streak: arc
+  }, {onConflict: 'profile_id,gate_type'}).then(function(){}).catch(function(){});
+}
+
 async function ensureNotifPrefs() {
   const pid = activeProfileId();
   if(!pid) return;
@@ -5006,6 +5023,18 @@ async function completeLogin(profile) {
         state.inventory = inv.filter(function(row){ return row.data; }).map(function(row){ return row.data; });
         (inv || []).forEach(function(row){
           if(row.equipped_slot && row.data) state.equipped[row.equipped_slot] = row.data;
+        });
+      }
+    } catch(e) {}
+    try {
+      const {data: pity} = await supa.from('pity_counters')
+        .select('gate_type, no_legendary_streak, no_arcane_streak').eq('profile_id', profile.id);
+      if(pity && pity.length) {
+        if(!state.pityCounters) state.pityCounters = {legendary:{normal:0,high:0,red:0}, arcane:{normal:0,high:0,red:0}};
+        pity.forEach(function(row){
+          if(!row.gate_type) return;
+          state.pityCounters.legendary[row.gate_type] = row.no_legendary_streak || 0;
+          state.pityCounters.arcane[row.gate_type] = row.no_arcane_streak || 0;
         });
       }
     } catch(e) {}
