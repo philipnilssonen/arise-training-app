@@ -363,9 +363,27 @@ body{
    confirmed). The 1/9 height buffer on .boss-figure (BOSS_FIGURE_BUFFER in
    JS) stays — WebKit clips filter bleed to the box an element renders in
    when the artwork touches its own canvas edge with zero margin (the feet;
-   device-confirmed) — do not remove either fix without re-testing on iOS. */
+   device-confirmed) — do not remove either fix without re-testing on iOS.
+
+   .boss-stage's height (310px) is NOT a shrink — it's the tallest of the 5
+   shipped bosses' own previous natural render height (measured at a real
+   375-390px viewport, where 74% of the header's content width binds before
+   the 270px cap does) plus a hair of margin, so nothing gets smaller than it
+   already was; shorter/wider bosses just get more visible air above them,
+   which is the point of bottom-anchoring. If a future boss needs more,
+   raise this one shared number — do not shrink it or special-case a boss.
+
+   Horizontal glow buffer: .boss-window's overflow:hidden crops each half
+   vertically (intentional — that's the seam), but its left/right edges sit
+   flush with the image's own width with zero margin, so they ALSO clipped
+   the glow's sideways bleed into a straight vertical edge (device-confirmed,
+   2nd report on the rectangle-glow bug — moving clip-path to overflow:hidden
+   fixed the TOP/BOTTOM clipping but not this). Fix: each <img> is rendered
+   narrower than its .boss-window (BOSS_WIDTH_BUFFER in JS) and centered,
+   so there's real empty space on both sides, inside the window, before its
+   overflow:hidden edge — same idea as the vertical buffer, done sideways. */
 .boss-stage{
-  position:relative;height:190px;width:74%;max-width:270px;margin:4px auto 12px;
+  position:relative;height:340px;width:74%;max-width:270px;margin:4px auto 12px;
   display:flex;align-items:flex-end;justify-content:center;overflow:visible;
 }
 .boss-figure{
@@ -1085,7 +1103,7 @@ BOSS_NAMES.push(['The Absolute One','Chaos Sovereign','Void God']);
 // Swap BOSS_ASSET_BASE to a Supabase Storage public URL later = one-line change.
 const BOSS_ASSET_BASE = 'assets/bosses/';
 const BOSS_VISUAL_META = {
-  iron_troll:        { type: 'split', w: 898, h: 906, splitFraction: 0.70 },
+  iron_troll:        { type: 'split', w: 898, h: 906, splitFraction: 0.76 },
   stone_crawler:     { type: 'split', w: 880, h: 774, splitFraction: 0.65 },
   goblin_warchief:   { type: 'split', w: 791, h: 909, splitFraction: 0.68 },
   orc_berserker:     { type: 'split', w: 906, h: 925, splitFraction: 0.60 },
@@ -1112,12 +1130,33 @@ const BOSS_GATE_FX = {
 // tab revisits) don't restart the breathing animation or re-download images.
 let _bossFigure = { key: null, node: null, failed: false };
 
-// Container is inflated 1/9 taller than the artwork's true ratio, giving a
-// 10%-tall strip of real empty space below the feet — see the .boss-figure
-// CSS comment for why (iOS clips filter/drop-shadow bleed where the artwork
-// has no transparent margin of its own, i.e. right at the feet — device-
-// confirmed bug, do not remove without re-testing on iOS).
-const BOSS_FIGURE_BUFFER = 1 / 9;
+// Container is inflated taller than the artwork's true ratio on BOTH top and
+// bottom, giving real empty space for the glow to bleed into on every edge
+// — see the .boss-figure CSS comment for why (iOS/Chromium both clip filter/
+// drop-shadow bleed where the artwork has no transparent margin of its own).
+// Bottom (feet) confirmed on a real iOS device; top (e.g. Stone Crawler's
+// head spikes reaching the very top of its own canvas) reproduced here in
+// Chromium as the same flat-cut-glow symptom, just at the opposite edge —
+// both edges need their own buffer, a boss's margin can be thin on either.
+const BOSS_FIGURE_BOTTOM_BUFFER = 1 / 9;
+const BOSS_FIGURE_TOP_BUFFER = 1 / 9;
+
+// Split-type images sit inside a .boss-window (overflow:hidden, crops top/
+// bottom on purpose — that's the seam). Its left/right edges sit flush with
+// the image's own width though, so they ALSO clip the glow's sideways bleed
+// into a hard vertical edge (device-confirmed). Fix: each .boss-window is
+// widened by this many px on both sides (via left/width, not by touching
+// .boss-figure's own size or aspect-ratio), and the <img> inside is pulled
+// back in by the same amount so it renders at its original, unshrunk size —
+// only the window's own overflow:hidden boundary moves outward, giving the
+// shadow real room to fade before it, bleeding into .boss-header's own
+// overflow:visible space exactly like it always could vertically. A % based
+// buffer would shrink the visible artwork to make internal room for itself
+// (tried, tested, rejected — it made the boss smaller); this only affects
+// the window, so .boss-figure's size (hence how big the boss looks) is
+// unchanged. Not needed for type:'whole' — that image isn't inside any
+// overflow:hidden window.
+const BOSS_WINDOW_SIDE_BUFFER = 36; // px, each side
 
 // .boss-stage is a fixed-size "card", same for every boss. .boss-figure must
 // shrink to fit inside it like object-fit:contain, bottom-anchored — but it
@@ -1145,57 +1184,70 @@ function buildBossFigure(bossName, gateType) {
   stage.className = 'boss-stage';
   const fig = document.createElement('div');
   fig.className = 'boss-figure';
-  const inflatedH = meta.h * (1 + BOSS_FIGURE_BUFFER);
-  fig.dataset.ratio = meta.w / inflatedH;
-  // aspect-ratio lets the browser derive the auto axis (set by _fitBossFigure)
-  // from whichever axis is forced to 100% — no JS measuring for that part.
-  fig.style.cssText = 'aspect-ratio:' + meta.w + '/' + inflatedH +
-    ';--sat:' + fx.sat + ';--bri:' + fx.bri + ';--gc:' + fx.gc;
-  stage.appendChild(fig);
-  if(window.ResizeObserver){
-    new ResizeObserver(function(){ _fitBossFigure(stage); }).observe(stage);
-  }
+  const inflatedH = meta.h * (1 + BOSS_FIGURE_TOP_BUFFER + BOSS_FIGURE_BOTTOM_BUFFER);
+  // true image height as a fraction of the (now taller) figure, and where its
+  // top edge sits (the rest above it is BOSS_FIGURE_TOP_BUFFER, empty space).
+  const imgFrac = meta.h / inflatedH;
+  const imgTopFrac = BOSS_FIGURE_TOP_BUFFER / (1 + BOSS_FIGURE_TOP_BUFFER + BOSS_FIGURE_BOTTOM_BUFFER);
+  const src = BOSS_ASSET_BASE + meta.key + '.png';
   let errored = false;
   function onErr(){ if(errored) return; errored = true; _bossFigure.failed = true;
     try { console.warn('[boss-visual] image failed to load for', meta.key); } catch(e){}
     if(stage.parentNode) stage.parentNode.removeChild(stage);
     _bossFigure.node = null;
   }
-  const src = BOSS_ASSET_BASE + meta.key + '.png';
   if(meta.type === 'whole'){
+    // no .boss-window involved, so no side-clipping risk — figure = true ratio.
+    fig.dataset.ratio = meta.w / inflatedH;
+    fig.style.cssText = 'aspect-ratio:' + meta.w + '/' + inflatedH +
+      ';--sat:' + fx.sat + ';--bri:' + fx.bri + ';--gc:' + fx.gc;
+    stage.appendChild(fig);
+    if(window.ResizeObserver){ new ResizeObserver(function(){ _fitBossFigure(stage); }).observe(stage); }
     const img = document.createElement('img');
-    img.className = 'boss-upper'; img.alt = ''; img.style.bottom = '10%';
+    img.className = 'boss-upper'; img.alt = ''; img.style.top = (imgTopFrac * 100).toFixed(3) + '%';
     img.onerror = onErr; img.src = src;
     fig.appendChild(img);
     return stage;
   }
   // split: same src on both <img>s — an overflow:hidden "window" per half
   // crops each one (not clip-path on the image itself, see CSS comment).
-  // imgFrac = the image's own rendered height as a fraction of .boss-figure
-  // (the rest is BOSS_FIGURE_BUFFER, empty space for the iOS glow fix).
-  const imgFrac = 1 / (1 + BOSS_FIGURE_BUFFER);
-  const bufferFracOfFigure = 1 - imgFrac;
-  const splitAbs = meta.splitFraction * imgFrac;       // seam position, fraction of .boss-figure height from its top
-  const upperWinH = (splitAbs * 100).toFixed(3) + '%';
-  const lowerWinH = ((1 - splitAbs) * 100).toFixed(3) + '%';
-  // The lower window is shorter than .boss-figure, so the image's normal
-  // "bottom:10%-of-figure" offset has to be re-expressed as a % of the
-  // window's own (smaller) height to land in the same absolute spot.
-  const imgBottomInLowerWin = ((bufferFracOfFigure / (1 - splitAbs)) * 100).toFixed(3) + '%';
+  // .boss-figure's own size/ratio is untouched by the side buffer (still
+  // just height-inflated top+bottom) — the boss must render at its full
+  // previous size, so nothing about "how big it looks" changes here.
+  fig.dataset.ratio = meta.w / inflatedH;
+  fig.style.cssText = 'aspect-ratio:' + meta.w + '/' + inflatedH +
+    ';--sat:' + fx.sat + ';--bri:' + fx.bri + ';--gc:' + fx.gc;
+  stage.appendChild(fig);
+  if(window.ResizeObserver){ new ResizeObserver(function(){ _fitBossFigure(stage); }).observe(stage); }
+
+  const sideBuf = BOSS_WINDOW_SIDE_BUFFER;
+  const winSideStyle = 'left:-' + sideBuf + 'px;width:calc(100% + ' + (sideBuf * 2) + 'px);';
+  // pulls the <img> back in by the same amount, landing it at its original
+  // left:0/100%-of-.boss-figure size — only the window grew, not the image.
+  const imgSideStyle = 'left:' + sideBuf + 'px;width:calc(100% - ' + (sideBuf * 2) + 'px);';
+  const imgBottomFrac = imgTopFrac + imgFrac;          // where the true image ends, fraction of figure height from the top
+  const seamFrac = imgTopFrac + meta.splitFraction * imgFrac; // seam position, fraction of .boss-figure height from its top
+  const upperWinH = (seamFrac * 100).toFixed(3) + '%';
+  const lowerWinH = ((1 - seamFrac) * 100).toFixed(3) + '%';
+  // Each window is shorter than .boss-figure, so the image's true top/bottom
+  // offset (in figure terms) has to be re-expressed as a % of that window's
+  // own (smaller) height to land in the same absolute spot.
+  const imgTopInUpperWin = ((imgTopFrac / seamFrac) * 100).toFixed(3) + '%';
+  const imgBottomInLowerWin = (((1 - imgBottomFrac) / (1 - seamFrac)) * 100).toFixed(3) + '%';
 
   const winUpper = document.createElement('div');
-  winUpper.className = 'boss-window'; winUpper.style.cssText = 'top:0;height:' + upperWinH;
+  winUpper.className = 'boss-window'; winUpper.style.cssText = 'top:0;height:' + upperWinH + ';' + winSideStyle;
   const upper = document.createElement('img');
   upper.className = 'boss-upper'; upper.alt = ''; upper.onerror = onErr;
-  upper.style.top = '0';
+  upper.style.cssText = 'top:' + imgTopInUpperWin + ';' + imgSideStyle;
   upper.style.transformOrigin = '50% ' + (meta.splitFraction * 100).toFixed(3) + '%'; // breathes from the fixed torso/legs seam, not its own edge
   winUpper.appendChild(upper);
 
   const winLower = document.createElement('div');
-  winLower.className = 'boss-window'; winLower.style.cssText = 'top:' + upperWinH + ';height:' + lowerWinH;
+  winLower.className = 'boss-window'; winLower.style.cssText = 'top:' + upperWinH + ';height:' + lowerWinH + ';' + winSideStyle;
   const lower = document.createElement('img');
   lower.className = 'boss-lower'; lower.alt = ''; lower.onerror = onErr;
-  lower.style.bottom = imgBottomInLowerWin;
+  lower.style.cssText = 'bottom:' + imgBottomInLowerWin + ';' + imgSideStyle;
   winLower.appendChild(lower);
 
   fig.appendChild(winLower); fig.appendChild(winUpper);
