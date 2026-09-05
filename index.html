@@ -395,14 +395,29 @@ body{
      it kicks in, so we pick the binding axis explicitly instead of guessing. */
 }
 .boss-window{position:absolute;left:0;width:100%;overflow:hidden}
-.boss-lower,.boss-upper{
+.boss-lower,.boss-upper,.boss-glow{
   position:absolute;left:0;width:100%;display:block;
+  /* top/bottom offset (+ transform-origin on .boss-upper for split bosses)
+     set inline per boss in buildBossFigure() */
+}
+/* Split bosses: .boss-window's overflow:hidden (needed to crop each half at
+   the seam) also crops any drop-shadow computed INSIDE it — so a filter on
+   .boss-upper/.boss-lower individually can't blend across the seam; each
+   half's shadow stops dead at its own window edge, leaving a visible line
+   right at the split (reported on device). A shared .boss-glow — same src,
+   full size, unclipped, NOT inside any .boss-window, and critically NEVER
+   animated — sits behind both windows (z-index/DOM-order: appended first)
+   and carries the ONE shared drop-shadow for the whole silhouette, so there
+   is nothing left to seam. It intentionally does not breathe, matching
+   .boss-lower; only .boss-upper's visible (non-shadowed) pixels move.
+   .boss-lower/.boss-upper keep color grading only (see .boss-color-filter) —
+   no shadow of their own, so nothing conflicts with .boss-glow's. */
+.boss-color-filter{filter:saturate(var(--sat,1)) brightness(var(--bri,1))}
+.boss-glow-filter{
   filter:
     saturate(var(--sat,1)) brightness(var(--bri,1))
     drop-shadow(0 0 5px var(--gc,var(--accent)))
     drop-shadow(0 0 14px var(--gc,var(--accent)));
-  /* top/bottom offset (+ transform-origin on .boss-upper for split bosses)
-     set inline per boss in buildBossFigure() */
 }
 .boss-upper{animation:boss-breathe 3.6s ease-in-out infinite}
 @keyframes boss-breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.022)}}
@@ -1204,7 +1219,7 @@ function buildBossFigure(bossName, gateType) {
     stage.appendChild(fig);
     if(window.ResizeObserver){ new ResizeObserver(function(){ _fitBossFigure(stage); }).observe(stage); }
     const img = document.createElement('img');
-    img.className = 'boss-upper'; img.alt = ''; img.style.top = (imgTopFrac * 100).toFixed(3) + '%';
+    img.className = 'boss-upper boss-glow-filter'; img.alt = ''; img.style.top = (imgTopFrac * 100).toFixed(3) + '%';
     img.onerror = onErr; img.src = src;
     fig.appendChild(img);
     return stage;
@@ -1235,10 +1250,20 @@ function buildBossFigure(bossName, gateType) {
   const imgTopInUpperWin = ((imgTopFrac / seamFrac) * 100).toFixed(3) + '%';
   const imgBottomInLowerWin = (((1 - imgBottomFrac) / (1 - seamFrac)) * 100).toFixed(3) + '%';
 
+  // Shared glow layer: same src, full size, unclipped (no .boss-window,
+  // no side buffer needed — .boss-figure is already overflow:visible), and
+  // crucially never animated. Carries the ONE drop-shadow for the whole
+  // silhouette so there's no per-half shadow to seam at the split line.
+  // Appended first = behind both windows (DOM order, no z-index needed).
+  const glow = document.createElement('img');
+  glow.className = 'boss-glow boss-glow-filter'; glow.alt = ''; glow.onerror = onErr;
+  glow.style.top = (imgTopFrac * 100).toFixed(3) + '%';
+  fig.appendChild(glow);
+
   const winUpper = document.createElement('div');
   winUpper.className = 'boss-window'; winUpper.style.cssText = 'top:0;height:' + upperWinH + ';' + winSideStyle;
   const upper = document.createElement('img');
-  upper.className = 'boss-upper'; upper.alt = ''; upper.onerror = onErr;
+  upper.className = 'boss-upper boss-color-filter'; upper.alt = ''; upper.onerror = onErr;
   upper.style.cssText = 'top:' + imgTopInUpperWin + ';' + imgSideStyle;
   upper.style.transformOrigin = '50% ' + (meta.splitFraction * 100).toFixed(3) + '%'; // breathes from the fixed torso/legs seam, not its own edge
   winUpper.appendChild(upper);
@@ -1246,12 +1271,12 @@ function buildBossFigure(bossName, gateType) {
   const winLower = document.createElement('div');
   winLower.className = 'boss-window'; winLower.style.cssText = 'top:' + upperWinH + ';height:' + lowerWinH + ';' + winSideStyle;
   const lower = document.createElement('img');
-  lower.className = 'boss-lower'; lower.alt = ''; lower.onerror = onErr;
+  lower.className = 'boss-lower boss-color-filter'; lower.alt = ''; lower.onerror = onErr;
   lower.style.cssText = 'bottom:' + imgBottomInLowerWin + ';' + imgSideStyle;
   winLower.appendChild(lower);
 
   fig.appendChild(winLower); fig.appendChild(winUpper);
-  lower.src = src; upper.src = src;
+  glow.src = src; lower.src = src; upper.src = src;
   return stage;
 }
 
