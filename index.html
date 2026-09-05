@@ -1904,6 +1904,17 @@ function skillCap(rankIndex) {
   return Math.min(30, (rankIndex + 1) * 10);
 }
 
+const _SKILL_KEYS = ['legendaryPlus','bonusItem','broadPower','discipline','streakDamage'];
+// Total skill budget = unspent points + points already allocated into skills.
+// Monotonic (level-ups add, spending just relocates), so it's a safe way to
+// tell which of two copies of a profile is more advanced.
+function _skillBudget(skillPoints, skills) {
+  let total = (typeof skillPoints === 'number' ? skillPoints : 0);
+  const s = skills || {};
+  _SKILL_KEYS.forEach(function(k){ total += (s[k] || 0); });
+  return total;
+}
+
 // Legendary+ Likelihood — multiplicative bonus on the Legendary/Arcane base
 // rate. Does NOT touch the pity counters directly (pity still counts actual
 // outcomes, so it's affected only indirectly by more Leg/Arc drops landing —
@@ -4735,22 +4746,24 @@ async function _pushNotifState() {
     updated_at: new Date().toISOString()
   };
   try {
-    // Same regression signature as the profiles-mirror bug: a freshly-reset
-    // local state (0 skill points, all-zero skills) must never overwrite an
-    // existing non-zero cloud value. Only the skill/streak fields are held
-    // back if this trips — schedule/weekly counters are fine to keep syncing.
+    // Skill budget (unspent points + all points already allocated into skills)
+    // only ever increases — a level-up adds a point, spending moves point->skill,
+    // so the total is monotonic. If the cloud copy's budget is higher than this
+    // device's, this device is simply behind (stale/reset cache) and must not
+    // push its lower numbers over the cloud — hold the skill/streak fields back.
+    // This is stricter than the old "local looks fresh" check, which let a
+    // partially-stale local state (e.g. 2 points vs 7 in cloud) clobber anyway.
     const {data} = await supa.from('notification_state')
-      .select('skill_points, skills').eq('profile_id', pid).single();
+      .select('skill_points, skills, current_streak_days').eq('profile_id', pid).single();
     if(data) {
-      const cloudSkillPoints = data.skill_points || 0;
-      const cloudSkills = data.skills || {};
-      const cloudHasSkills = cloudSkillPoints > 0 || Object.values(cloudSkills).some(function(v){ return v > 0; });
-      const localSkills = state.skills || {};
-      const localLooksFresh = !state.skillPoints && !Object.values(localSkills).some(function(v){ return v > 0; });
-      if(cloudHasSkills && localLooksFresh) {
-        console.warn('[syncNotifState] refused to overwrite cloud skills/skill_points with a fresh-default local state', {cloud:data, local:{skillPoints:state.skillPoints, skills:state.skills}});
-        delete payload.skill_points; delete payload.skills;
-        delete payload.current_streak_days; delete payload.last_trained_date; delete payload.last_skill_point_at;
+      const cloudBudget = _skillBudget(data.skill_points, data.skills);
+      const localBudget = _skillBudget(state.skillPoints, state.skills);
+      if(cloudBudget > localBudget) {
+        console.warn('[syncNotifState] refused to overwrite cloud skills/skill_points — cloud budget higher, local is behind', {cloudBudget, localBudget, cloud:data, local:{skillPoints:state.skillPoints, skills:state.skills}});
+        delete payload.skill_points; delete payload.skills; delete payload.last_skill_point_at;
+        if((data.current_streak_days || 0) > (state.currentStreakDays || 0)) {
+          delete payload.current_streak_days; delete payload.last_trained_date;
+        }
       }
     }
   } catch(e) { /* read failed — fall through and still push the rest */ }
@@ -4969,6 +4982,20 @@ async function completeLogin(profile) {
       }
     } catch(e) {}
   }
+  // Skill reconciliation — runs on EVERY login, not just a fresh cache. iOS
+  // standalone PWAs keep their own storage bucket that survives "clear website
+  // data" in Safari, so hadLocal can be true even right after a reinstall; a
+  // remote skill_points correction (made via SQL) would then never land. If the
+  // cloud copy's skill budget is higher than local, local is stale — pull it.
+  try {
+    const {data: sr} = await supa.from('notification_state')
+      .select('skills, skill_points').eq('profile_id', profile.id).single();
+    if(sr && _skillBudget(sr.skill_points, sr.skills) > _skillBudget(state.skillPoints, state.skills)) {
+      if(sr.skills) state.skills = Object.assign({legendaryPlus:0, bonusItem:0, broadPower:0, discipline:0, streakDamage:0}, sr.skills);
+      if(typeof sr.skill_points === 'number') state.skillPoints = sr.skill_points;
+      console.warn('[completeLogin] pulled skills/skill_points from cloud (cloud budget higher than local)', {cloud:sr, localAfter:{skillPoints:state.skillPoints, skills:state.skills}});
+    }
+  } catch(e) {}
   // Backfill presetKey for profiles created before the preset system existed
   // (e.g. Jonathan) — server-side preset_key is the source of truth here.
   if(!state.presetKey && profile.preset_key) { state.presetKey = profile.preset_key; }
