@@ -420,7 +420,7 @@ body{
     drop-shadow(0 0 14px var(--gc,var(--accent)));
 }
 .boss-upper{animation:boss-breathe 3.6s ease-in-out infinite}
-@keyframes boss-breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.022)}}
+@keyframes boss-breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.020)}}
 @media (prefers-reduced-motion:reduce){.boss-upper{animation:none}}
 /* GATE RESULT */
 .gate-result{text-align:center;padding:16px 0}
@@ -1760,9 +1760,29 @@ function addXP(amount, source) {
 // blir RANKS-leaderboarden fryst vid vad profilen hade vid skapande (E1).
 // Fire-and-forget, ingen debounce: skrivs bara vid faktiska rank/level-ändringar
 // (processLevels + confirmRankUp), inte på varje saveState().
-function syncProfileRank() {
+// Regression guard (added after the 2026-09-05 incident): reads the cloud
+// row first and refuses to write a rank/level that's LOWER than what's
+// already there. completeLogin() hydrating rank/level/xp on a fresh cache
+// should make this unreachable in practice, but this is the backstop for
+// any other path (multi-device, a future bug) that ends up calling this
+// with local state that hasn't caught up to the cloud yet — protects every
+// profile, not just the one that hit the original bug.
+async function syncProfileRank() {
   const pid = activeProfileId();
   if(!pid) return;
+  try {
+    const {data} = await supa.from('profiles').select('rank, level').eq('id', pid).single();
+    if(data) {
+      const cloudRankIdx = Math.max(0, RANKS.indexOf(data.rank || 'E'));
+      const isRegression = state.rank < cloudRankIdx ||
+        (state.rank === cloudRankIdx && state.level < (data.level || 1));
+      if(isRegression) {
+        console.warn('[syncProfileRank] refused to overwrite cloud (' + data.rank + data.level +
+          ') with a lower local value (' + RANKS[state.rank] + state.level + ')');
+        return;
+      }
+    }
+  } catch(e) { /* read failed — fall through and still try the write */ }
   supa.from('profiles')
     .update({rank: RANKS[state.rank], level: state.level, xp: state.xp})
     .eq('id', pid)
@@ -4838,7 +4858,21 @@ function completeLogin(profile) {
   const hadLocal = !!localStorage.getItem(key);
   localStorage.setItem('arise_active_profile', profile.id);
   state = loadState(profile.preset_key);
-  if(!hadLocal) { state.name = profile.display_name; }
+  if(!hadLocal) {
+    state.name = profile.display_name;
+    // No local cache (fresh device, or cleared site data) — hydrate rank/
+    // level/xp from the cloud mirror instead of leaving fresh zeros. Without
+    // this, the first level-up after a cache loss calls syncProfileRank()
+    // with the fresh defaults and permanently overwrites the real cloud
+    // values — this is exactly what happened on 2026-09-05 (Philip's
+    // profile reset to E2/0xp after a PWA reinstall). profiles.rank/level/xp
+    // is the only slice of real progress that has ever lived server-side,
+    // so it's the only thing we CAN recover here — stats/inventory/skills
+    // remain local-only until the persistence work below ships.
+    if(profile.rank) state.rank = Math.max(0, RANKS.indexOf(profile.rank));
+    if(typeof profile.level === 'number') state.level = profile.level;
+    if(typeof profile.xp === 'number') state.xp = profile.xp;
+  }
   // Backfill presetKey for profiles created before the preset system existed
   // (e.g. Jonathan) — server-side preset_key is the source of truth here.
   if(!state.presetKey && profile.preset_key) { state.presetKey = profile.preset_key; }
