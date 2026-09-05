@@ -1,4 +1,5 @@
-// ARISE service worker — push plumbing only, no game logic.
+// ARISE service worker — push plumbing + cache-busting.
+//
 // Payload contract sent by the send-push Edge Function:
 //   { title, body, tag, data, action }
 //   action: "show" (default) -> show a notification, replacing any with the same tag
@@ -10,8 +11,17 @@
 // user manually swiping it away should remove it. The Notification API has no
 // "don't dismiss on click" option, so the workaround is to immediately re-post
 // the same notification right after handling the tap.
+//
+// CACHING STRATEGY — network-first for same-origin GETs:
+// index.html is the whole app (one file). iOS standalone PWAs cache the app
+// shell very aggressively and survive "clear website data", which repeatedly
+// left old JS running on a device even after source fixes were deployed. So:
+// always try the network first and only fall back to cache when offline. Bump
+// BUILD_ID on every deploy so the browser sees a byte change here too and runs
+// install/activate, which purges every stale cache.
 
-const CACHE_NAME = 'arise-shell-v1';
+const BUILD_ID = '2026-09-05T16:05Z';
+const CACHE_NAME = 'arise-shell-' + BUILD_ID;
 const SHELL_ASSETS = ['./index.html', './manifest.json'];
 
 self.addEventListener('install', (event) => {
@@ -22,7 +32,39 @@ self.addEventListener('install', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil((async () => {
+    const names = await caches.keys();
+    await Promise.all(names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n)));
+    await self.clients.claim();
+  })());
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
+});
+
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  if (req.method !== 'GET') return;
+
+  const url = new URL(req.url);
+  if (url.origin !== self.location.origin) return; // never touch Supabase / CDN calls
+
+  // Network-first: newest deploy always wins when online; cache is offline fallback.
+  event.respondWith((async () => {
+    try {
+      const fresh = await fetch(req, { cache: 'no-store' });
+      if (fresh && fresh.ok && (req.mode === 'navigate' || url.pathname.endsWith('.html') || url.pathname.endsWith('/'))) {
+        const cache = await caches.open(CACHE_NAME);
+        cache.put('./index.html', fresh.clone());
+      }
+      return fresh;
+    } catch (e) {
+      const cached = await caches.match(req) || await caches.match('./index.html');
+      if (cached) return cached;
+      throw e;
+    }
+  })());
 });
 
 self.addEventListener('push', (event) => {

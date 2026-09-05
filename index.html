@@ -675,6 +675,7 @@ body{
           <button class="btn btn-sm" data-a="syncPresetData" style="grid-column:1/-1">🔁 SYNC PRESET DATA</button>
           <button class="btn btn-sm" data-a="pullSkillCorrection" style="grid-column:1/-1">☁️ PULL FROM CLOUD (skills/streak)</button>
           <button class="btn btn-sm btn-danger" data-a="resetAll" style="grid-column:1/-1">🔄 RESET PROFILE</button>
+          <div id="build-stamp" style="grid-column:1/-1;font-size:10px;letter-spacing:1px;color:var(--muted,#888);text-align:center;padding-top:6px"></div>
         </div>
       </div>
       <div style="height:16px"></div>
@@ -941,6 +942,11 @@ body{
 // ============================================================
 //  CONSTANTS & RANK DATA
 // ============================================================
+// Bump on every deploy — must match BUILD_ID in sw.js. Shown in DEMO TOOLS so
+// we can confirm exactly which code version a given device is actually running
+// vs. what's deployed (iOS PWAs cache the shell hard; see sw.js caching notes).
+const BUILD_ID = '2026-09-05T16:05Z';
+
 const RANKS = ['E','D','C','B','A','S'];
 const RANK_COLORS = {E:'#9ca3af',D:'#34d399',C:'#60a5fa',B:'#c084fc',A:'#fb923c',S:'#fbbf24'};
 const RANK_TITLES = {E:'Iron Hunter',D:'Bronze Hunter',C:'Silver Hunter',B:'Gold Hunter',A:'Platinum Hunter',S:'Shadow Monarch'};
@@ -4606,10 +4612,32 @@ const VAPID_PUBLIC_KEY = 'BLuiXv94hAv5ElaQQxkGNvXXTwZRnyWUgSC3AF-u_8QhAQlgUxIDi-
 
 let swRegistration = null;
 
+let _swReloading = false;
 async function registerServiceWorker() {
   if(!('serviceWorker' in navigator)) return null;
   try {
     swRegistration = await navigator.serviceWorker.register('sw.js');
+
+    // When a new worker installs while a controller is already active, a fresh
+    // build has been deployed — take it over and reload once so the running JS
+    // matches what's live. Without this iOS PWAs can keep old JS for days.
+    swRegistration.addEventListener('updatefound', function(){
+      const sw = swRegistration.installing;
+      if(!sw) return;
+      sw.addEventListener('statechange', function(){
+        if(sw.state === 'installed' && navigator.serviceWorker.controller){
+          sw.postMessage({type:'SKIP_WAITING'});
+        }
+      });
+    });
+    navigator.serviceWorker.addEventListener('controllerchange', function(){
+      if(_swReloading) return;
+      _swReloading = true;
+      location.reload();
+    });
+    // Force an update check on every launch (the browser's own check can lag).
+    swRegistration.update().catch(function(){});
+
     return swRegistration;
   } catch(e) {
     console.warn('Service worker registration failed', e);
@@ -5480,6 +5508,8 @@ function bootApp() {
   renderAll();
   updateSessionPill();
   registerServiceWorker();
+  const _bs = document.getElementById('build-stamp');
+  if(_bs) _bs.textContent = 'BUILD ' + BUILD_ID;
   ensureNotifPrefs();
   syncNotifState();
   checkPendingReward();
