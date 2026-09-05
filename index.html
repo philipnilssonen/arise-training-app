@@ -1662,7 +1662,7 @@ async function checkPendingReward() {
     if(reward.xp) addXP(reward.xp);
     if(Array.isArray(reward.loot) && reward.loot.length) {
       if(!state.inventory) state.inventory = [];
-      reward.loot.forEach(function(item){ state.inventory.push(item); });
+      reward.loot.forEach(function(item){ state.inventory.push(item); syncInventoryAdd(item); });
     }
     saveState();
     renderAll();
@@ -1676,7 +1676,8 @@ function saveState() {
   const key = profileStateKey();
   if(!key) return;
   try { localStorage.setItem(key, JSON.stringify(state)); } catch(e){}
-  syncNotifState(); // debounced spegel till notification_state (Brief B)
+  syncNotifState();  // debounced spegel till notification_state (Brief B)
+  syncProfileState(); // debounced spegel till profiles.rank/level/xp/stats
 }
 
 // ============================================================
@@ -1756,37 +1757,49 @@ function addXP(amount, source) {
   renderStatus();
 }
 
-// Håller profiles.rank/level/xp i Supabase i synk med lokal state — utan detta
-// blir RANKS-leaderboarden fryst vid vad profilen hade vid skapande (E1).
-// Fire-and-forget, ingen debounce: skrivs bara vid faktiska rank/level-ändringar
-// (processLevels + confirmRankUp), inte på varje saveState().
-// Regression guard (added after the 2026-09-05 incident): reads the cloud
-// row first and refuses to write a rank/level that's LOWER than what's
-// already there. completeLogin() hydrating rank/level/xp on a fresh cache
-// should make this unreachable in practice, but this is the backstop for
-// any other path (multi-device, a future bug) that ends up calling this
-// with local state that hasn't caught up to the cloud yet — protects every
-// profile, not just the one that hit the original bug.
-async function syncProfileRank() {
+// Håller profiles.rank/level/xp/str/agi/vit/dis i Supabase i synk med lokal
+// state — utan rank/level blir RANKS-leaderboarden fryst vid vad profilen
+// hade vid skapande (E1); stats hade tidigare ingen cloud-persistence alls
+// (2026-09-05 incident: local cache blev tomt efter en cache-rensning,
+// appen initierade ett färskt default-state, och skrev det över den
+// riktiga cloud-raden vid nästa level-up — se completeLogin()). Folded into
+// the same debounced-on-saveState() pattern as syncNotifState() (own timer,
+// so it can't collide with or delay that one) instead of firing only on
+// level-up, so stats get mirrored on every real change too, not just ranks.
+let _profileSyncTimer = null;
+function syncProfileState() {
+  if(!activeProfileId()) return;
+  clearTimeout(_profileSyncTimer);
+  _profileSyncTimer = setTimeout(_pushProfileState, 800);
+}
+
+async function _pushProfileState() {
   const pid = activeProfileId();
-  if(!pid) return;
+  if(!pid || !state) return;
   try {
-    const {data} = await supa.from('profiles').select('rank, level').eq('id', pid).single();
+    const {data} = await supa.from('profiles').select('rank, level, str, agi, vit, dis').eq('id', pid).single();
     if(data) {
       const cloudRankIdx = Math.max(0, RANKS.indexOf(data.rank || 'E'));
-      const isRegression = state.rank < cloudRankIdx ||
+      const isRankRegression = state.rank < cloudRankIdx ||
         (state.rank === cloudRankIdx && state.level < (data.level || 1));
-      if(isRegression) {
-        console.warn('[syncProfileRank] refused to overwrite cloud (' + data.rank + data.level +
-          ') with a lower local value (' + RANKS[state.rank] + state.level + ')');
+      // Stats have no simple "always increases" guarantee to check against,
+      // but writing an all-zero set over an existing non-zero one is never
+      // legitimate — that's this exact bug's signature — so block that
+      // specific shape regardless of the rank/level check above.
+      const cloudHasStats = (data.str||0) + (data.agi||0) + (data.vit||0) + (data.dis||0) > 0;
+      const localStatsAllZero = !state.str && !state.agi && !state.vit && !state.dis;
+      if(isRankRegression || (cloudHasStats && localStatsAllZero)) {
+        console.warn('[syncProfileState] refused to overwrite cloud profile with regressed/fresh-default local state', {cloud:data, local:{rank:RANKS[state.rank],level:state.level,str:state.str,agi:state.agi,vit:state.vit,dis:state.dis}});
         return;
       }
     }
   } catch(e) { /* read failed — fall through and still try the write */ }
-  supa.from('profiles')
-    .update({rank: RANKS[state.rank], level: state.level, xp: state.xp})
-    .eq('id', pid)
-    .then(function(){}).catch(function(){});
+  try {
+    await supa.from('profiles').update({
+      rank: RANKS[state.rank], level: state.level, xp: state.xp,
+      str: state.str||0, agi: state.agi||0, vit: state.vit||0, dis: state.dis||0,
+    }).eq('id', pid);
+  } catch(e) {}
 }
 
 function processLevels() {
@@ -1816,7 +1829,7 @@ function processLevels() {
     notifQueue.push({rank:state.rank, fromLevel:startLevel, toLevel:state.level, points:pointsGained});
     if(!notifShowing) showNextNotif();
     maybePushLevelUp();
-    syncProfileRank();
+    // profiles mirror now synced via saveState() -> syncProfileState() (debounced)
   }
   if(justRankPending) maybePushRankUp(RANKS[Math.min(state.rank + 1, 5)]);
 }
@@ -2309,7 +2322,7 @@ function applyGateOutcome(result) {
   let loot = null;
   if(result === 'victory') {
     loot = rollLoot(state.gate.type);
-    loot.forEach(function(item){ if(!state.inventory) state.inventory=[]; state.inventory.push(item); });
+    loot.forEach(function(item){ if(!state.inventory) state.inventory=[]; state.inventory.push(item); syncInventoryAdd(item); });
     updatePityCounters(loot.map(function(i){return i.rarity;}), state.gate.type);
     let xpBonus = GATE_VICTORY_XP[state.rank];
     if(hasPassive('xp_siphon')) xpBonus = Math.round(xpBonus * 1.20);
@@ -3596,8 +3609,7 @@ function confirmRankUp() {
 
   // Skill cap increases with rank — nothing to reset, new cap unlocked
   document.getElementById('rankup-overlay').classList.remove('show');
-  saveState();
-  syncProfileRank();
+  saveState(); // -> syncProfileState() (debounced) picks up the new rank
   renderAll();
 
   // Show rank-up notification
@@ -4153,9 +4165,11 @@ function doItemAction() {
       if(!confirm('Replace "' + existing.name + '" with "' + item.name + '"?')) return;
     }
     state.equipped[slotKey] = item;
+    syncInventoryEquip(item.id, slotKey);
     showToast(item.name + ' equipped!');
   } else {
     state.equipped[slotKey] = null;
+    syncInventoryUnequip(item.id);
     showToast(item.name + ' unequipped.');
   }
   document.getElementById('item-modal').classList.remove('show');
@@ -4168,6 +4182,7 @@ function doSalvage() {
   const xp = SALVAGE_XP[item.rarity] || 25;
   if(!confirm('Salvage "' + item.name + '" för +' + xp + ' XP?\nDetta kan inte ångras.')) return;
   state.inventory = (state.inventory || []).filter(function(i){ return i.id !== item.id; });
+  syncInventoryRemove(item.id);
   document.getElementById('item-modal').classList.remove('show');
   _itemModalCtx = null;
   addXPAndLog(xp, 'salvage', 'Salvage: ' + item.name + ' (' + item.rarity + ')', todayISO());
@@ -4699,27 +4714,85 @@ function syncNotifState() {
 async function _pushNotifState() {
   const pid = activeProfileId();
   if(!pid || !state) return;
+  const payload = {
+    profile_id: pid,
+    schedule: (state.schedule || []).map(function(d){ return d.type; }),
+    days_per_week: state.daysPerWeek || 0,
+    weekly_gym: state.weeklyGym || 0,
+    weekly_cardio: state.weeklyCardio || 0,
+    today_date: todayISO(),
+    today_gym_logged: (state.logs || []).some(function(l){ return l.type === 'gym' && l.date === todayISO(); }),
+    today_nutrition_done: !!(state.nutritionToday && state.nutritionToday.protein && state.nutritionToday.calories && state.nutritionToday.water),
+    skill_points: state.skillPoints || 0,
+    last_skill_point_at: state.lastSkillPointTS ? new Date(state.lastSkillPointTS).toISOString() : null,
+    // Cloud mirror — read back both via the explicit "PULL FROM CLOUD" action
+    // AND automatically on a fresh-cache login (completeLogin()), so a build/
+    // streak survives a device loss or cache clear instead of being silently
+    // reset and then overwriting the cloud copy at the next skill-point spend.
+    skills: state.skills || null,
+    current_streak_days: state.currentStreakDays || 0,
+    last_trained_date: state.lastTrainedDate || null,
+    updated_at: new Date().toISOString()
+  };
   try {
-    await supa.from('notification_state').upsert({
-      profile_id: pid,
-      schedule: (state.schedule || []).map(function(d){ return d.type; }),
-      days_per_week: state.daysPerWeek || 0,
-      weekly_gym: state.weeklyGym || 0,
-      weekly_cardio: state.weeklyCardio || 0,
-      today_date: todayISO(),
-      today_gym_logged: (state.logs || []).some(function(l){ return l.type === 'gym' && l.date === todayISO(); }),
-      today_nutrition_done: !!(state.nutritionToday && state.nutritionToday.protein && state.nutritionToday.calories && state.nutritionToday.water),
-      skill_points: state.skillPoints || 0,
-      last_skill_point_at: state.lastSkillPointTS ? new Date(state.lastSkillPointTS).toISOString() : null,
-      // Cloud mirror (write-only from here — never read back except via the
-      // explicit "PULL FROM CLOUD" action) so a build/streak can be inspected
-      // or corrected remotely if a device is lost or a formula needs fixing.
-      skills: state.skills || null,
-      current_streak_days: state.currentStreakDays || 0,
-      last_trained_date: state.lastTrainedDate || null,
-      updated_at: new Date().toISOString()
-    }, {onConflict: 'profile_id'});
+    // Same regression signature as the profiles-mirror bug: a freshly-reset
+    // local state (0 skill points, all-zero skills) must never overwrite an
+    // existing non-zero cloud value. Only the skill/streak fields are held
+    // back if this trips — schedule/weekly counters are fine to keep syncing.
+    const {data} = await supa.from('notification_state')
+      .select('skill_points, skills').eq('profile_id', pid).single();
+    if(data) {
+      const cloudSkillPoints = data.skill_points || 0;
+      const cloudSkills = data.skills || {};
+      const cloudHasSkills = cloudSkillPoints > 0 || Object.values(cloudSkills).some(function(v){ return v > 0; });
+      const localSkills = state.skills || {};
+      const localLooksFresh = !state.skillPoints && !Object.values(localSkills).some(function(v){ return v > 0; });
+      if(cloudHasSkills && localLooksFresh) {
+        console.warn('[syncNotifState] refused to overwrite cloud skills/skill_points with a fresh-default local state', {cloud:data, local:{skillPoints:state.skillPoints, skills:state.skills}});
+        delete payload.skill_points; delete payload.skills;
+        delete payload.current_streak_days; delete payload.last_trained_date; delete payload.last_skill_point_at;
+      }
+    }
+  } catch(e) { /* read failed — fall through and still push the rest */ }
+  try {
+    await supa.from('notification_state').upsert(payload, {onConflict: 'profile_id'});
   } catch(e) {}
+}
+
+// public.inventory mirror — event-based (write at the moment it happens),
+// like gate_damage_events, not debounced: loot/salvage/equip are discrete,
+// infrequent actions, not a hot path. item_key holds the item's own local
+// `id` (a generated string, not the row's own uuid `id` column) so a full
+// hydration can match rows back to items; `data` is the complete item
+// object (see generateItem()) since items are uniquely rolled, not drawn
+// from a fixed catalog — rarity/equipped_slot alone can't reconstruct one.
+function syncInventoryAdd(item) {
+  const pid = activeProfileId();
+  if(!pid || !item) return;
+  supa.from('inventory').insert({ profile_id: pid, item_key: item.id, rarity: item.rarity, data: item })
+    .then(function(){}).catch(function(){});
+}
+function syncInventoryRemove(itemId) {
+  const pid = activeProfileId();
+  if(!pid || !itemId) return;
+  supa.from('inventory').delete().eq('profile_id', pid).eq('item_key', itemId)
+    .then(function(){}).catch(function(){});
+}
+function syncInventoryEquip(itemId, slotKey) {
+  const pid = activeProfileId();
+  if(!pid || !itemId || !slotKey) return;
+  // Clear whoever previously held this slot, then claim it for this item.
+  supa.from('inventory').update({equipped_slot: null}).eq('profile_id', pid).eq('equipped_slot', slotKey)
+    .then(function(){
+      supa.from('inventory').update({equipped_slot: slotKey}).eq('profile_id', pid).eq('item_key', itemId)
+        .then(function(){}).catch(function(){});
+    }).catch(function(){});
+}
+function syncInventoryUnequip(itemId) {
+  const pid = activeProfileId();
+  if(!pid || !itemId) return;
+  supa.from('inventory').update({equipped_slot: null}).eq('profile_id', pid).eq('item_key', itemId)
+    .then(function(){}).catch(function(){});
 }
 
 async function ensureNotifPrefs() {
@@ -4853,25 +4926,48 @@ async function fetchGateProfiles() {
   }
 }
 
-function completeLogin(profile) {
+async function completeLogin(profile) {
   const key = profileStateKey(profile.id);
   const hadLocal = !!localStorage.getItem(key);
   localStorage.setItem('arise_active_profile', profile.id);
   state = loadState(profile.preset_key);
   if(!hadLocal) {
     state.name = profile.display_name;
-    // No local cache (fresh device, or cleared site data) — hydrate rank/
-    // level/xp from the cloud mirror instead of leaving fresh zeros. Without
-    // this, the first level-up after a cache loss calls syncProfileRank()
-    // with the fresh defaults and permanently overwrites the real cloud
-    // values — this is exactly what happened on 2026-09-05 (Philip's
-    // profile reset to E2/0xp after a PWA reinstall). profiles.rank/level/xp
-    // is the only slice of real progress that has ever lived server-side,
-    // so it's the only thing we CAN recover here — stats/inventory/skills
-    // remain local-only until the persistence work below ships.
+    // No local cache (fresh device, or cleared site data) — hydrate every
+    // cloud-mirrored field into the fresh state instead of leaving zeros.
+    // Without this, the first change that hits any of the debounced/event
+    // syncs below (syncProfileState, syncNotifState, inventory writes)
+    // pushes the fresh defaults straight over real cloud history — this is
+    // exactly what happened on 2026-09-05 (Philip's profile reset to E2/0xp
+    // after a PWA reinstall, before this hydration + the regression guards
+    // in _pushProfileState/_pushNotifState existed).
     if(profile.rank) state.rank = Math.max(0, RANKS.indexOf(profile.rank));
     if(typeof profile.level === 'number') state.level = profile.level;
     if(typeof profile.xp === 'number') state.xp = profile.xp;
+    if(typeof profile.str === 'number') state.str = profile.str;
+    if(typeof profile.agi === 'number') state.agi = profile.agi;
+    if(typeof profile.vit === 'number') state.vit = profile.vit;
+    if(typeof profile.dis === 'number') state.dis = profile.dis;
+    try {
+      const {data: ns} = await supa.from('notification_state')
+        .select('skills, skill_points, current_streak_days, last_trained_date')
+        .eq('profile_id', profile.id).single();
+      if(ns) {
+        if(ns.skills) state.skills = Object.assign({legendaryPlus:0, bonusItem:0, broadPower:0, discipline:0, streakDamage:0}, ns.skills);
+        if(typeof ns.skill_points === 'number') state.skillPoints = ns.skill_points;
+        if(typeof ns.current_streak_days === 'number') state.currentStreakDays = ns.current_streak_days;
+        if(ns.last_trained_date) state.lastTrainedDate = ns.last_trained_date;
+      }
+    } catch(e) {}
+    try {
+      const {data: inv} = await supa.from('inventory').select('data, equipped_slot').eq('profile_id', profile.id);
+      if(inv && inv.length) {
+        state.inventory = inv.filter(function(row){ return row.data; }).map(function(row){ return row.data; });
+        (inv || []).forEach(function(row){
+          if(row.equipped_slot && row.data) state.equipped[row.equipped_slot] = row.data;
+        });
+      }
+    } catch(e) {}
   }
   // Backfill presetKey for profiles created before the preset system existed
   // (e.g. Jonathan) — server-side preset_key is the source of truth here.
