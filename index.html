@@ -945,7 +945,7 @@ body{
 // Bump on every deploy — must match BUILD_ID in sw.js. Shown in DEMO TOOLS so
 // we can confirm exactly which code version a given device is actually running
 // vs. what's deployed (iOS PWAs cache the shell hard; see sw.js caching notes).
-const BUILD_ID = '2026-09-05T16:25Z';
+const BUILD_ID = '2026-09-05T16:45Z';
 
 const RANKS = ['E','D','C','B','A','S'];
 const RANK_COLORS = {E:'#9ca3af',D:'#34d399',C:'#60a5fa',B:'#c084fc',A:'#fb923c',S:'#fbbf24'};
@@ -1779,32 +1779,79 @@ function syncProfileState() {
   _profileSyncTimer = setTimeout(_pushProfileState, 800);
 }
 
+// Total stat budget = unspent free stat points + points already spent into
+// str/agi/vit/dis. Monotonic (rank-ups/events add, spending relocates), so —
+// exactly like _skillBudget — a higher cloud value means this device is behind.
+function _statBudget(freeStatPoints, str, agi, vit, dis) {
+  return (freeStatPoints||0) + (str||0) + (agi||0) + (vit||0) + (dis||0);
+}
+
 async function _pushProfileState() {
   const pid = activeProfileId();
   if(!pid || !state) return;
+
+  const payload = {
+    rank: RANKS[state.rank], level: state.level, xp: state.xp,
+    str: state.str||0, agi: state.agi||0, vit: state.vit||0, dis: state.dis||0,
+    str_progress: state.strProgress||0, agi_progress: state.agiProgress||0, vit_progress: state.vitProgress||0,
+    free_stat_points: state.freeStatPoints||0,
+    total_xp_earned: state.totalXpEarned||0,
+    lifts: state.lifts || {bench:0,squat:0,deadlift:0,ohp:0},
+  };
+
   try {
-    const {data} = await supa.from('profiles').select('rank, level, str, agi, vit, dis').eq('id', pid).single();
+    const {data} = await supa.from('profiles')
+      .select('rank, level, str, agi, vit, dis, str_progress, agi_progress, vit_progress, free_stat_points, total_xp_earned')
+      .eq('id', pid).single();
     if(data) {
+      // --- Core rank/stats: the profile-reset signature. Writing an all-zero
+      // stat set over a non-zero cloud one, or a regressed rank/level, is never
+      // legitimate — bail entirely, write nothing. ---
       const cloudRankIdx = Math.max(0, RANKS.indexOf(data.rank || 'E'));
       const isRankRegression = state.rank < cloudRankIdx ||
         (state.rank === cloudRankIdx && state.level < (data.level || 1));
-      // Stats have no simple "always increases" guarantee to check against,
-      // but writing an all-zero set over an existing non-zero one is never
-      // legitimate — that's this exact bug's signature — so block that
-      // specific shape regardless of the rank/level check above.
       const cloudHasStats = (data.str||0) + (data.agi||0) + (data.vit||0) + (data.dis||0) > 0;
       const localStatsAllZero = !state.str && !state.agi && !state.vit && !state.dis;
       if(isRankRegression || (cloudHasStats && localStatsAllZero)) {
         console.warn('[syncProfileState] refused to overwrite cloud profile with regressed/fresh-default local state', {cloud:data, local:{rank:RANKS[state.rank],level:state.level,str:state.str,agi:state.agi,vit:state.vit,dis:state.dis}});
         return;
       }
+
+      // --- freeStatPoints: same budget model as skillPoints. If the cloud's
+      // total stat budget is higher, this device is behind — hold the field. ---
+      const cloudStatBudget = _statBudget(data.free_stat_points, data.str, data.agi, data.vit, data.dis);
+      const localStatBudget = _statBudget(state.freeStatPoints, state.str, state.agi, state.vit, state.dis);
+      if(cloudStatBudget > localStatBudget) {
+        console.warn('[syncProfileState] held back free_stat_points — cloud stat budget higher, local behind', {cloudStatBudget, localStatBudget});
+        delete payload.free_stat_points;
+      }
+
+      // --- totalXpEarned: strictly monotonic. Only block an actual decrease. ---
+      if((state.totalXpEarned||0) < (data.total_xp_earned||0)) {
+        console.warn('[syncProfileState] held back total_xp_earned — would decrease', {cloud:data.total_xp_earned, local:state.totalXpEarned});
+        delete payload.total_xp_earned;
+      }
+
+      // --- str/agi/vit progress: these DO drop legitimately, but only on a
+      // rollover into a stat point (progress hits 3 -> stat += 2, progress -= 3),
+      // mirroring how xp resets at a level-up. So a decrease is allowed ONLY
+      // when the matching stat has also risen vs the cloud; a progress drop with
+      // no matching stat gain is a regression — hold that one axis. ---
+      [['strProgress','str_progress','str'],
+       ['agiProgress','agi_progress','agi'],
+       ['vitProgress','vit_progress','vit']].forEach(function(m){
+        const localProg = state[m[0]]||0, cloudProg = data[m[1]]||0;
+        const localStat = state[m[2]]||0, cloudStat = data[m[2]]||0;
+        if(localProg < cloudProg && localStat <= cloudStat) {
+          console.warn('[syncProfileState] held back ' + m[1] + ' — progress dropped without a matching stat gain', {localProg, cloudProg, localStat, cloudStat});
+          delete payload[m[1]];
+        }
+      });
     }
   } catch(e) { /* read failed — fall through and still try the write */ }
+
   try {
-    await supa.from('profiles').update({
-      rank: RANKS[state.rank], level: state.level, xp: state.xp,
-      str: state.str||0, agi: state.agi||0, vit: state.vit||0, dis: state.dis||0,
-    }).eq('id', pid);
+    await supa.from('profiles').update(payload).eq('id', pid);
   } catch(e) {}
 }
 
@@ -5006,6 +5053,12 @@ async function completeLogin(profile) {
     if(typeof profile.agi === 'number') state.agi = profile.agi;
     if(typeof profile.vit === 'number') state.vit = profile.vit;
     if(typeof profile.dis === 'number') state.dis = profile.dis;
+    if(typeof profile.str_progress === 'number') state.strProgress = profile.str_progress;
+    if(typeof profile.agi_progress === 'number') state.agiProgress = profile.agi_progress;
+    if(typeof profile.vit_progress === 'number') state.vitProgress = profile.vit_progress;
+    if(typeof profile.free_stat_points === 'number') state.freeStatPoints = profile.free_stat_points;
+    if(typeof profile.total_xp_earned === 'number') state.totalXpEarned = profile.total_xp_earned;
+    if(profile.lifts && typeof profile.lifts === 'object') state.lifts = Object.assign({bench:0,squat:0,deadlift:0,ohp:0}, profile.lifts);
     try {
       const {data: ns} = await supa.from('notification_state')
         .select('skills, skill_points, current_streak_days, last_trained_date')
@@ -5053,6 +5106,17 @@ async function completeLogin(profile) {
       console.warn('[completeLogin] pulled skills/skill_points from cloud (cloud budget higher than local)', {cloud:sr, localAfter:{skillPoints:state.skillPoints, skills:state.skills}});
     }
   } catch(e) {}
+  // Free-stat-point reconciliation — same every-login rationale as skills above.
+  // profile.* is a full SELECT (fetchGateProfiles), so no extra round-trip.
+  if(_statBudget(profile.free_stat_points, profile.str, profile.agi, profile.vit, profile.dis)
+     > _statBudget(state.freeStatPoints, state.str, state.agi, state.vit, state.dis)) {
+    if(typeof profile.free_stat_points === 'number') state.freeStatPoints = profile.free_stat_points;
+    if(typeof profile.str === 'number') state.str = profile.str;
+    if(typeof profile.agi === 'number') state.agi = profile.agi;
+    if(typeof profile.vit === 'number') state.vit = profile.vit;
+    if(typeof profile.dis === 'number') state.dis = profile.dis;
+    console.warn('[completeLogin] pulled free_stat_points/stats from cloud (cloud stat budget higher than local)', {cloud:{fsp:profile.free_stat_points, str:profile.str, agi:profile.agi, vit:profile.vit, dis:profile.dis}});
+  }
   // Backfill presetKey for profiles created before the preset system existed
   // (e.g. Jonathan) — server-side preset_key is the source of truth here.
   if(!state.presetKey && profile.preset_key) { state.presetKey = profile.preset_key; }
