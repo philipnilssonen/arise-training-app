@@ -945,7 +945,7 @@ body{
 // Bump on every deploy — must match BUILD_ID in sw.js. Shown in DEMO TOOLS so
 // we can confirm exactly which code version a given device is actually running
 // vs. what's deployed (iOS PWAs cache the shell hard; see sw.js caching notes).
-const BUILD_ID = '2026-09-06T21:55Z';
+const BUILD_ID = '2026-09-06T22:10Z';
 
 const RANKS = ['E','D','C','B','A','S'];
 const RANK_COLORS = {E:'#9ca3af',D:'#34d399',C:'#60a5fa',B:'#c084fc',A:'#fb923c',S:'#fbbf24'};
@@ -1130,6 +1130,9 @@ const BOSS_VISUAL_META = {
   orc_berserker:     { type: 'split', w: 906, h: 925, splitFraction: 0.60 },
   shadow_wolf_alpha: { type: 'split', w: 896, h: 826, splitFraction: 0.72 },
   bone_drake:        { type: 'whole', w: 924, h: 888 },
+  troll_champion:    { type: 'split', w: 837, h: 884, splitFraction: 0.68 },
+  cursed_knight:     { type: 'split', w: 740, h: 935, splitFraction: 0.70 },
+  void_golem:        { type: 'split', w: 669, h: 952, splitFraction: 0.65 },
 };
 function bossVisualKey(displayName) {
   return String(displayName || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
