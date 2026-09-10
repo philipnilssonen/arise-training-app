@@ -20,7 +20,7 @@
 // BUILD_ID on every deploy so the browser sees a byte change here too and runs
 // install/activate, which purges every stale cache.
 
-const BUILD_ID = '2026-09-06T22:10Z';
+const BUILD_ID = '2026-09-10T12:00Z';
 const CACHE_NAME = 'arise-shell-' + BUILD_ID;
 const SHELL_ASSETS = ['./index.html', './manifest.json'];
 

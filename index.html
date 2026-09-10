@@ -945,7 +945,7 @@ body{
 // Bump on every deploy — must match BUILD_ID in sw.js. Shown in DEMO TOOLS so
 // we can confirm exactly which code version a given device is actually running
 // vs. what's deployed (iOS PWAs cache the shell hard; see sw.js caching notes).
-const BUILD_ID = '2026-09-06T22:10Z';
+const BUILD_ID = '2026-09-10T12:00Z';
 
 const RANKS = ['E','D','C','B','A','S'];
 const RANK_COLORS = {E:'#9ca3af',D:'#34d399',C:'#60a5fa',B:'#c084fc',A:'#fb923c',S:'#fbbf24'};
@@ -1064,6 +1064,13 @@ const BASE_GYM    = [50, 100, 200, 400, 800, 1600];
 const BASE_CARDIO = [50, 100, 200, 400, 800, 1600];
 const BASE_MIXED  = [50, 100, 200, 400, 800, 1600];
 const BASE_QUEST  = [20, 40, 80, 160, 320, 640];
+// Boss -> player damage is TEMPORARILY disabled: gate fights are one-directional
+// for now (player damages the boss, never the reverse). Flip back to true to
+// restore missed-session boss damage and the HP-draining item curses — all that
+// logic is kept intact, just gated on this flag. Separately and permanently:
+// the Death outcome no longer imposes a cooldown (see applyGateOutcome).
+const BOSS_DAMAGE_ENABLED = false;
+
 // BOSS DAMAGE PER MISSED SCHEDULED SESSION (Gym/Cardio/Mixed — NOT Daily Quest).
 // Balance patch: one flat value per gate type (no more gym-vs-other split), scaled
 // by bossMult(bossRankIndex) = 1.3^rankIndex (replaces the old ~flat 2^(idx/100)).
@@ -2241,6 +2248,7 @@ function dealBossDamage(amount, label) {
 }
 
 function dealPlayerDamage(baseAmt, reason) {
+  if(!BOSS_DAMAGE_ENABLED) return; // boss->player damage temporarily disabled
   if(!state.gate || !state.gate.active) return;
   // iron_will: absorb first boss damage
   if(hasPassive('iron_will') && !state.ironWillUsed) {
@@ -2376,16 +2384,15 @@ function applyGateOutcome(result) {
   unsubscribeGateChannel();
   state.gate.active = false;
   state.gate.result = result;
-  // Cooldown: Victory=none, Abandon=48h, Death=72h. Timeout removed as a
-  // concept entirely (balance patch) — a gate no longer auto-ends on a
-  // deadline, so there's no third cooldown bucket for it anymore.
-  if(result === 'victory') {
-    state.gate.cooldownUntil = null;
-    state.lastGateVictoryTS = Date.now();
-  } else {
-    const cdDays = result === 'defeat_abandoned' ? 2 : 3; // defeat_hp, or any unexpected value, defaults to the safer 72h
-    const cd = new Date(); cd.setDate(cd.getDate() + cdDays);
+  // Cooldown: Abandon=48h only. Victory and Death both carry NO cooldown —
+  // Death used to be 72h, that's been permanently removed (dying no longer
+  // "costs" anything but the gate itself). Timeout was removed earlier.
+  if(result === 'defeat_abandoned') {
+    const cd = new Date(); cd.setDate(cd.getDate() + 2);
     state.gate.cooldownUntil = cd.toISOString().split('T')[0];
+  } else {
+    state.gate.cooldownUntil = null;
+    if(result === 'victory') state.lastGateVictoryTS = Date.now();
   }
   let loot = null;
   if(result === 'victory') {
@@ -2405,7 +2412,7 @@ function applyGateOutcome(result) {
   } else if(result === 'defeat_abandoned') {
     showToast('Gate abandoned — 48h cooldown.');
   } else {
-    showToast('Defeated — 72h cooldown.');
+    showToast('Defeated — gate failed. No cooldown.');
   }
   // Reset all gate-scoped stacks on every gate end (victory, death, or abandon)
   state.berserkerStack = 0; state.voidHungerStack = 0; state.endlessStrideStack = 0;
@@ -3582,7 +3589,7 @@ function simulateWeekEnd() {
   // minus what was actually logged, per type (so existing per-type item
   // curses below keep working — the new formula just made their base damage
   // type-blind, not the accounting of which type was missed).
-  if(state.gate && state.gate.active) {
+  if(BOSS_DAMAGE_ENABLED && state.gate && state.gate.active) {
     const g = state.gate;
     const schedGym    = state.schedule.filter(function(d){return d.type==='gym';}).length;
     const schedCardio = state.schedule.filter(function(d){return d.type==='cardio';}).length;
@@ -5600,6 +5607,13 @@ async function abandonGateShared() {
 //  INIT
 // ============================================================
 function bootApp() {
+  // One-time: Death used to impose a 72h cooldown, now removed. Clear any
+  // lingering death-cooldown so hunters who died under the old rules aren't
+  // still locked out. Idempotent — safe to keep running every boot.
+  if(state.gate && state.gate.result === 'defeat_hp' && state.gate.cooldownUntil) {
+    state.gate.cooldownUntil = null;
+    saveState();
+  }
   checkDailyReset();
   loadActiveSession();
   renderAll();
