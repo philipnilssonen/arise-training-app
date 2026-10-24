@@ -972,7 +972,7 @@ body{
 // Bump on every deploy — must match BUILD_ID in sw.js. Shown in DEMO TOOLS so
 // we can confirm exactly which code version a given device is actually running
 // vs. what's deployed (iOS PWAs cache the shell hard; see sw.js caching notes).
-const BUILD_ID = '2026-10-24T12:42Z';
+const BUILD_ID = '2026-10-24T12:56Z';
 
 const RANKS = ['E','D','C','B','A','S'];
 const RANK_COLORS = {E:'#9ca3af',D:'#34d399',C:'#60a5fa',B:'#c084fc',A:'#fb923c',S:'#fbbf24'};
@@ -3060,9 +3060,8 @@ function renderHome() {
     const sts = [{key:'str',icon:'💪',color:'#60a5fa',label:'STR'},{key:'agi',icon:'⚡',color:'#34d399',label:'AGI'},{key:'vit',icon:'❤️',color:'#ef4444',label:'VIT'},{key:'dis',icon:'🎯',color:'#e879f9',label:'DIS'}];
     hsEl.innerHTML = '<div class="stat-mini-row">' + sts.map(function(s){
       const base = state[s.key]||0, bonus = effectiveStat(s.key) - base, v = base + bonus;
-      const p = Math.min(100,v/250*100);
-      const bonusHtml = bonus > 0 ? '<div style="font-size:9px;color:#fbbf24;line-height:1">+' + bonus + '</div>' : '';
-      return '<div class="stat-mini"><div style="font-size:14px">' + s.icon + '</div><div class="stat-mini-val" style="color:' + s.color + '">' + v + '</div>' + bonusHtml + '<div style="font-size:9px;letter-spacing:1px;color:var(--dim)">' + s.label + '</div><div class="stat-mini-bar"><div class="stat-mini-fill" style="background:' + s.color + ';width:' + p + '%"></div></div></div>';
+      const bonusHtml = '<div style="font-size:9px;color:' + (bonus > 0 ? '#fbbf24' : 'var(--dim)') + ';line-height:1">+' + bonus + '</div>';
+      return '<div class="stat-mini"><div style="font-size:14px">' + s.icon + '</div><div class="stat-mini-val" style="color:' + s.color + '">' + v + '</div>' + bonusHtml + '<div style="font-size:9px;letter-spacing:1px;color:var(--dim)">' + s.label + '</div></div>';
     }).join('') + '</div>';
   }
 
