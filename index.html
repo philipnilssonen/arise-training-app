@@ -473,6 +473,8 @@ body{
 .edit-day-btn{background:none;border:none;cursor:pointer;font-size:14px;padding:4px 6px;opacity:.6;flex-shrink:0;line-height:1;margin-left:auto}
 .edit-day-btn:hover,.edit-day-btn:active{opacity:1}
 /* WORKOUT EDITOR MODAL */
+#base-modal,#picker-modal{position:fixed;inset:0;z-index:190;display:none;background:rgba(5,10,18,.9);backdrop-filter:blur(6px);align-items:flex-start;justify-content:center;padding:16px;overflow-y:auto}
+#base-modal.show,#picker-modal.show{display:flex}
 #workout-editor-modal{position:fixed;inset:0;z-index:200;display:none;background:rgba(5,10,18,.9);backdrop-filter:blur(6px);align-items:flex-start;justify-content:center;padding:16px;overflow-y:auto}
 #workout-editor-modal.show{display:flex}
 .we-box{background:#060e1c;border:1px solid var(--border);border-radius:8px;padding:18px 16px;width:100%;max-width:420px;margin-top:50px}
@@ -691,10 +693,10 @@ body{
     <div id="tab-train" class="tab-pane">
       <div class="panel">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-          <div class="panel-title" style="margin:0">WEEKLY PLAN</div>
-          <button class="btn btn-sm" data-a="configProgram" id="btn-config">CONFIGURE</button>
+          <div class="panel-title" style="margin:0" id="week-title">THIS WEEK</div>
+          <button class="btn btn-sm" data-a="openBase" id="btn-base">[ ⚙ BASE SCHEDULE ]</button>
         </div>
-        <div id="swap-hint" style="display:none;margin-bottom:8px" class="swap-hint">Tap another day to swap ↔</div>
+        <div id="swap-hint" style="display:none;margin-bottom:8px" class="swap-hint">Tap the day to move it to ↔</div>
         <div class="week-grid" id="week-grid"></div>
       </div>
       <!-- Day detail panel (normal mode) -->
@@ -837,7 +839,7 @@ body{
         <input class="form-input" id="set-height" type="number" placeholder="187">
       </div>
       <div class="form-group">
-        <label class="form-label">Days/week</label>
+        <label class="form-label">Days/week (from base schedule)</label>
         <input class="form-input" id="set-days" type="number" placeholder="4" min="1" max="7">
       </div>
     </div>
@@ -869,6 +871,31 @@ body{
     <div style="font-size:11px;color:var(--dim);text-align:center;margin-top:10px">
       <button class="btn btn-sm btn-danger" data-a="resetAll">RESET ALL DATA</button>
     </div>
+  </div>
+</div>
+
+<!-- BASE SCHEDULE MODAL -->
+<div id="base-modal">
+  <div class="we-box">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <div class="panel-title" style="margin:0">BASE SCHEDULE</div>
+      <button class="btn btn-sm btn-danger" data-a="baseClose">✕ CANCEL</button>
+    </div>
+    <div id="base-count" style="font-size:11px;color:var(--dim);margin-bottom:10px"></div>
+    <div id="base-list"></div>
+    <div class="btn-row" style="margin-top:12px"><button class="btn btn-green" data-a="baseSave" style="flex:1">SAVE</button></div>
+    <div style="margin-top:10px;font-size:11px;color:var(--dim);text-align:center;font-style:italic">Changes apply from next Monday.</div>
+  </div>
+</div>
+
+<!-- SESSION PICKER MODAL (extra pass / add to week) -->
+<div id="picker-modal">
+  <div class="we-box">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <div class="panel-title" style="margin:0">PICK SESSION</div>
+      <button class="btn btn-sm btn-danger" data-a="pickerClose">✕</button>
+    </div>
+    <div id="picker-list"></div>
   </div>
 </div>
 
@@ -945,7 +972,7 @@ body{
 // Bump on every deploy — must match BUILD_ID in sw.js. Shown in DEMO TOOLS so
 // we can confirm exactly which code version a given device is actually running
 // vs. what's deployed (iOS PWAs cache the shell hard; see sw.js caching notes).
-const BUILD_ID = '2026-09-10T12:00Z';
+const BUILD_ID = '2026-10-24T11:49Z';
 
 const RANKS = ['E','D','C','B','A','S'];
 const RANK_COLORS = {E:'#9ca3af',D:'#34d399',C:'#60a5fa',B:'#c084fc',A:'#fb923c',S:'#fbbf24'};
@@ -1507,8 +1534,9 @@ function defaultState(presetKey) {
     nutritionDoneToday:false,
     rankUpPending:false,
     lastDate: null,
-    schedule: JSON.parse(JSON.stringify(DEFAULT_SCHEDULE)),
-    customWorkouts: null,
+    schedule: JSON.parse(JSON.stringify(DEFAULT_SCHEDULE)), // legacy — only used to seed scheduleTemplate
+    customWorkouts: null,                                   // legacy — same
+    scheduleTemplate: null, weekPlan: null, pendingWeekEval: null,
     logs:[],
     lifts:{bench:0,squat:0,deadlift:0,ohp:0},
     logType:'gym',
@@ -1547,7 +1575,6 @@ function defaultState(presetKey) {
 
 let state = loadState();
 let swapSelected = null;
-let configMode = false;
 let notifQueue = [];
 let notifShowing = false;
 let notifTimer = null;
@@ -1631,6 +1658,9 @@ function syncPresetData() {
   state.kostplanMeals = preset.kostplan ? JSON.parse(JSON.stringify(preset.kostplan)) : null;
   state.schedule = JSON.parse(JSON.stringify(preset.schedule));
   state.customWorkouts = preset.workouts ? JSON.parse(JSON.stringify(preset.workouts)) : null;
+  state.scheduleTemplate = templateFromLegacy(null); // takes effect from next Monday
+  state.daysPerWeek = slotCount(state.scheduleTemplate);
+  pushTemplate();
   saveState();
   renderAll();
   showToast('Preset synkad — nutrition, schema & kostplan uppdaterade');
@@ -2048,23 +2078,183 @@ function checkDailyReset() {
   }
 }
 
-// Balance patch: simulateWeekEnd() (DIS gain, perfect-week crit, missed-session
-// boss damage, various passive checks) used to only ever run via the manual
-// "SIM WEEK END" demo button — nothing triggered it on a real week boundary.
-// This makes it real: checked once at boot, same granularity as
-// checkDailyReset(). A single ISO-week transition (however many real weeks
-// were actually skipped) always triggers exactly one simulateWeekEnd() call,
-// same no-pileup behavior as the existing daily check.
-function checkWeeklyReset() {
-  const wk = _isoWeekKey(new Date());
-  if(!state.lastWeekKey) {
-    // First time this field exists on this profile — establish a baseline
-    // without retroactively "punishing" a week that predates this feature.
-    state.lastWeekKey = wk;
-    saveState();
-    return;
+// ============================================================
+//  WEEKLY SCHEDULE — base template + this week's plan
+// ============================================================
+// scheduleTemplate: 7 slots (index 0 = Monday) {type, workout}. Edited only
+// from the BASE SCHEDULE modal. weekPlan: {week_start, required_sessions,
+// slots, done:[{id,date,type}]} — a copy of the template made on Monday;
+// required_sessions is a snapshot that nothing mid-week can lower. Both live
+// in Supabase (notification_state.schedule_template / .week_plan); cloud wins
+// on hydration, localStorage is only a cache. The template is only ever
+// pushed by an explicit SAVE (or the one-time null-guarded seed), never by
+// an automatic sync, so a stale cache cannot overwrite it.
+const WS_DAYS = ['MON','TUE','WED','THU','FRI','SAT','SUN'];
+
+function currentMonday() {
+  const ymd = new Intl.DateTimeFormat('en-CA', {timeZone:'Europe/Stockholm', year:'numeric', month:'2-digit', day:'2-digit'}).format(new Date());
+  return addDaysISO(ymd, -((new Date(ymd + 'T00:00:00Z').getUTCDay() + 6) % 7));
+}
+function _cloneJSON(x) { return JSON.parse(JSON.stringify(x)); }
+function slotCount(slots) { return (slots || []).filter(function(s){ return s && s.type !== 'rest'; }).length; }
+function weekSlots() { return (state.weekPlan && state.weekPlan.slots) || []; }
+function todaySlotIdx() { return [6,0,1,2,3,4,5][new Date().getDay()]; }
+
+function legacyWorkout(idx) {
+  const cw = state.customWorkouts;
+  if(cw && cw[idx]) return {name:cw[idx].name, exercises:cw[idx].exercises.map(function(e){ return {name:e.name, sets:e.sets, reps:e.reps}; })};
+  const w = BRO_SPLIT[idx] || BRO_SPLIT[0];
+  return {name:w.name, exercises:w.exerciseList.map(function(e){ return {name:e.name, sets:e.sets, reps:e.reps}; })};
+}
+// Seed for a profile that has no cloud template yet: day types from the cloud
+// `schedule` array when present (cloud wins), workouts from this device's legacy
+// schedule/customWorkouts.
+function templateFromLegacy(cloudTypes) {
+  const src = (Array.isArray(state.schedule) && state.schedule.length === 7) ? state.schedule : DEFAULT_SCHEDULE;
+  return src.map(function(d, i) {
+    let type = d.type === 'quest' ? 'rest' : d.type;
+    if(Array.isArray(cloudTypes) && cloudTypes.length === 7) type = cloudTypes[i];
+    if(type === 'gym') return {type:'gym', workout:legacyWorkout(d.workoutIdx != null ? d.workoutIdx : 0)};
+    return {type:type || 'rest', workout:null};
+  });
+}
+function newWeekPlan(weekStart, slots) {
+  return {week_start:weekStart, required_sessions:slotCount(slots), slots:_cloneJSON(slots), done:[]};
+}
+function weekDoneFromLogs(weekStart) {
+  const end = addDaysISO(weekStart, 6);
+  return (state.logs || []).filter(function(l){
+    return (l.type === 'gym' || l.type === 'cardio' || l.type === 'mixed') && l.date >= weekStart && l.date <= end;
+  }).map(function(l, i){ return {id:'bf' + l.date + '_' + i, date:l.date, type:l.type}; });
+}
+function ensureLocalSchedule() {
+  if(!state.scheduleTemplate) state.scheduleTemplate = templateFromLegacy(null);
+  if(!state.weekPlan) {
+    state.weekPlan = newWeekPlan(currentMonday(), state.scheduleTemplate);
+    state.weekPlan.done = weekDoneFromLogs(state.weekPlan.week_start);
   }
-  if(state.lastWeekKey !== wk) simulateWeekEnd(); // sets state.lastWeekKey itself
+  state.daysPerWeek = slotCount(state.scheduleTemplate);
+}
+
+// Shared helper (Brief A depends on this). Daily Quest never counts.
+function getWeeklyStatus() {
+  const wp = state.weekPlan;
+  const required = wp ? (wp.required_sessions || 0) : 0;
+  const done = wp ? (wp.done || []).length : 0;
+  return {required:required, done:done, remaining:Math.max(0, required - done)};
+}
+
+function recordSession(type, dateStr) {
+  const wp = state.weekPlan;
+  if(!wp) return;
+  const d = dateStr || todayISO();
+  if(d < wp.week_start) { showToast('Pass från en tidigare vecka — XP ges, men den veckan är redan utvärderad'); return; }
+  if(d > addDaysISO(wp.week_start, 6)) return;
+  wp.done.push({id:Date.now().toString(36) + Math.random().toString(36).slice(2, 6), date:d, type:type});
+  pushWeekPlanSoon();
+}
+
+let _wpTimer = null;
+function pushWeekPlanSoon() { clearTimeout(_wpTimer); _wpTimer = setTimeout(pushWeekPlan, 600); }
+async function pushWeekPlan() {
+  const pid = activeProfileId();
+  if(!pid || !state.weekPlan) return;
+  const local = state.weekPlan;
+  try {
+    const {data} = await supa.from('notification_state').select('week_plan').eq('profile_id', pid).single();
+    const cloud = data && data.week_plan;
+    if(!cloud) return; // creation is hydrateSchedule's job
+    if(cloud.week_start > local.week_start) { state.weekPlan = cloud; saveState(); renderAll(); return; } // this device is behind
+    if(cloud.week_start < local.week_start) return; // rollover owns that transition
+    const ids = {}; local.done.forEach(function(e){ ids[e.id] = 1; });
+    (cloud.done || []).forEach(function(e){ if(!ids[e.id]) local.done.push(e); });
+    local.required_sessions = Math.max(local.required_sessions || 0, cloud.required_sessions || 0); // never lowered
+    saveState();
+    await supa.from('notification_state').update({week_plan:local}).eq('profile_id', pid).eq('week_plan->>week_start', local.week_start);
+  } catch(e) {}
+}
+async function pushTemplate() {
+  const pid = activeProfileId();
+  if(!pid || !state.scheduleTemplate) return;
+  try { await supa.from('notification_state').update({schedule_template:state.scheduleTemplate, days_per_week:slotCount(state.scheduleTemplate)}).eq('profile_id', pid); } catch(e) {}
+}
+
+// Login-time hydration. Cloud wins; seeds are null-guarded so they can never
+// replace something another device already wrote.
+async function hydrateSchedule(pid) {
+  try {
+    await supa.from('notification_state').upsert({profile_id:pid}, {onConflict:'profile_id', ignoreDuplicates:true});
+    const sel = 'schedule, schedule_template, week_plan';
+    let {data} = await supa.from('notification_state').select(sel).eq('profile_id', pid).single();
+    if(!data) throw new Error('no row');
+    if(!data.schedule_template) {
+      await supa.from('notification_state').update({schedule_template:templateFromLegacy(data.schedule)}).eq('profile_id', pid).is('schedule_template', null);
+      ({data} = await supa.from('notification_state').select(sel).eq('profile_id', pid).single());
+    }
+    state.scheduleTemplate = data.schedule_template;
+    if(!data.week_plan) {
+      const cur = currentMonday();
+      const wp = newWeekPlan(cur, state.scheduleTemplate);
+      wp.done = weekDoneFromLogs(cur);
+      await supa.from('notification_state').update({week_plan:wp}).eq('profile_id', pid).is('week_plan', null);
+      ({data} = await supa.from('notification_state').select(sel).eq('profile_id', pid).single());
+    }
+    const prev = state.weekPlan;
+    state.weekPlan = data.week_plan;
+    if(prev && prev.week_start === state.weekPlan.week_start) { // offline-logged sessions survive
+      const ids = {}; state.weekPlan.done.forEach(function(e){ ids[e.id] = 1; });
+      prev.done.forEach(function(e){ if(!ids[e.id]) { state.weekPlan.done.push(e); pushWeekPlanSoon(); } });
+    }
+  } catch(e) { console.warn('[hydrateSchedule] falling back to local cache', e); }
+  ensureLocalSchedule();
+  saveState();
+}
+async function pullWeekPlan() {
+  const pid = activeProfileId();
+  try {
+    const {data} = await supa.from('notification_state').select('week_plan').eq('profile_id', pid).single();
+    if(data && data.week_plan) { state.weekPlan = data.week_plan; saveState(); }
+  } catch(e) {}
+}
+
+// Monday rollover. Claim first with a conditional update on week_start, so two
+// devices opening the app on Monday cannot both run the week end; only the
+// device whose update matched evaluates. The old weeks are parked in
+// state.pendingWeekEval (localStorage) before the claim so a crash after the
+// claim still evaluates on the next boot. Weeks skipped entirely are
+// evaluated in order against the current template with zero sessions (max 12).
+async function weeklyRollover() {
+  const pid = activeProfileId();
+  if(!pid || !state.weekPlan) return;
+  if(state.pendingWeekEval) { runPendingWeekEval(); }
+  const cur = currentMonday();
+  const old = state.weekPlan;
+  if(old.week_start >= cur) return;
+  const next = newWeekPlan(cur, state.scheduleTemplate);
+  const weeks = [old];
+  for(let ws = addDaysISO(old.week_start, 7), n = 0; ws < cur && n < 12; ws = addDaysISO(ws, 7), n++) {
+    weeks.push(newWeekPlan(ws, state.scheduleTemplate));
+  }
+  state.pendingWeekEval = {weeks:weeks};
+  saveState();
+  let claimed = false;
+  try {
+    const r = await supa.from('notification_state').update({week_plan:next}).eq('profile_id', pid).eq('week_plan->>week_start', old.week_start).select('profile_id');
+    if(r.error) throw r.error;
+    claimed = !!(r.data && r.data.length);
+  } catch(e) { state.pendingWeekEval = null; saveState(); return; } // offline — retry next boot
+  if(!claimed) { state.pendingWeekEval = null; saveState(); await pullWeekPlan(); renderAll(); return; }
+  state.weekPlan = next;
+  saveState();
+  runPendingWeekEval();
+  renderAll();
+}
+function runPendingWeekEval() {
+  const p = state.pendingWeekEval;
+  if(!p) return;
+  state.pendingWeekEval = null;
+  saveState();
+  p.weeks.forEach(function(w){ evaluateWeek(w); });
 }
 
 // ============================================================
@@ -2194,7 +2384,7 @@ async function startGate(gateType, demoHP) {
     const {error: gpErr} = await supa.from('gate_progress')
       .insert(party.map(function(pid){ return {
         gate_id: gi.id, profile_id: pid,
-        sessions_completed: 0, sessions_scheduled: 0,
+        sessions_completed: 0, sessions_scheduled: pid === me ? getWeeklyStatus().required : 0,
         player_max_hp: pid === me ? playerMaxHP : null,
         player_current_hp: pid === me ? playerMaxHP : null,
       }; }));
@@ -2817,8 +3007,9 @@ function renderHome() {
   }
 
   // Demo buttons
-  const gb = document.getElementById('btn-demo-gym'); if(gb) gb.textContent = '+GYM (' + state.weeklyGym + '/' + state.daysPerWeek + ')';
-  const cb = document.getElementById('btn-demo-cardio'); if(cb) cb.textContent = '+CARDIO (' + state.weeklyCardio + '/3)';
+  const _ws = getWeeklyStatus();
+  const gb = document.getElementById('btn-demo-gym'); if(gb) gb.textContent = '+GYM (' + _ws.done + '/' + _ws.required + ')';
+  const cb = document.getElementById('btn-demo-cardio'); if(cb) cb.textContent = '+CARDIO (' + _ws.done + '/' + _ws.required + ')';
 }
 
 function renderCharacter() {
@@ -2830,10 +3021,12 @@ function renderCharacter() {
   // --- STATS PANEL ---
   // DIS rule (balance patch, simplified): 4 training sessions this week, any
   // mix of gym/cardio/mixed, = +1 DIS. No more schedule-percentage math.
-  const DIS_SESSION_GOAL = 4;
-  const totalDoneW = state.weeklyGym + state.weeklyCardio + (state.weeklyMixed||0);
-  const disHint = totalDoneW >= DIS_SESSION_GOAL ? '+1 DIS' : '+0 DIS';
-  const disHC   = totalDoneW >= DIS_SESSION_GOAL ? '#34d399' : 'var(--dim)';
+  const _wsC = getWeeklyStatus();
+  const DIS_SESSION_GOAL = Math.max(1, _wsC.required);
+  const totalDoneW = _wsC.done;
+  const _disR = Math.min(totalDoneW, DIS_SESSION_GOAL) / DIS_SESSION_GOAL;
+  const disHint = _wsC.required > 0 && _disR >= 1 ? '+2 DIS' : (_wsC.required > 0 && _disR >= 0.8 ? '+1 DIS' : '+0 DIS');
+  const disHC   = disHint !== '+0 DIS' ? '#34d399' : 'var(--dim)';
   const sp = state.strProgress||0, ap = state.agiProgress||0, vp = state.vitProgress||0;
   const statDefs = [
     {key:'str',icon:'💪',color:'#60a5fa',label:'STR',weekly:sp, goal:3,         hint:'gym → +2 STR', hintColor:sp>=2?'#fbbf24':'var(--dim)'},
@@ -2968,70 +3161,53 @@ function renderCharacter() {
   el.innerHTML = statsHtml + freeStatHtml + skillHtml + invHtml + switchProfileHtml;
 }
 
+function _todaySlotDone(slot) {
+  const wp = state.weekPlan;
+  return !!(wp && slot && (wp.done || []).some(function(e){ return e.date === todayISO() && e.type === slot.type; }));
+}
+function _extraPassBtn(label) {
+  return '<div style="margin-top:10px"><button class="btn btn-sm" style="width:100%" data-a="extraPass">' + (label || '[ + EXTRA PASS ]') + '</button></div>';
+}
 function renderTodaySession() {
   const el = document.getElementById('today-session');
-  const dayIdx = new Date().getDay(); // 0=Sun
-  const map = [6,0,1,2,3,4,5]; // JS day → schedule index
-  const sched = state.schedule[map[dayIdx]];
+  const idx = todaySlotIdx();
+  const sched = weekSlots()[idx];
   if(!sched) { el.innerHTML = `<div style="color:var(--dim);font-family:'Barlow Condensed',sans-serif">No schedule data</div>`; return; }
+  const done = _todaySlotDone(sched);
 
   if(sched.type === 'rest') {
-    el.innerHTML = `<div class="session-card"><div class="session-type">REST DAY</div><div class="session-name" style="color:var(--dim)">Recovery & Rest</div><div class="session-exercises">Focus on sleep, mobility, and nutrition.</div></div>`;
+    el.innerHTML = `<div class="session-card"><div class="session-type">REST DAY</div><div class="session-name" style="color:var(--dim)">Recovery & Rest</div><div class="session-exercises">Focus on sleep, mobility, and nutrition.</div>${_extraPassBtn()}</div>`;
   } else if(sched.type === 'cardio') {
     el.innerHTML = `<div class="session-card">
       <div class="session-type" style="color:#34d399">CARDIO</div>
       <div class="session-name">Löpning eller cykel</div>
       <div class="session-exercises">25–30 min, måttlig intensitet.</div>
-      <div style="margin-top:10px"><button class="btn btn-sm" style="width:100%" data-a="goLogCardio">LOG CARDIO</button></div>
+      ${done ? '<div style="margin-top:10px;font-size:11px;font-weight:700;letter-spacing:2px;color:var(--rank-d)">✓ PASS AVSLUTAT</div>' + _extraPassBtn()
+             : '<div style="margin-top:10px"><button class="btn btn-sm" style="width:100%" data-a="goLogCardio">LOG CARDIO</button></div>'}
     </div>`;
   } else if(sched.type === 'mixed') {
     el.innerHTML = `<div class="session-card">
       <div class="session-type" style="color:#fb923c">MIXED/OTHER</div>
       <div class="session-name">Sport, hike, circuit...</div>
       <div class="session-exercises">Anything that isn't clearly gym or cardio.</div>
-      <div style="margin-top:10px"><button class="btn btn-sm" style="width:100%" data-a="goLogMixed">LOG MIXED/OTHER</button></div>
-    </div>`;
-  } else if(sched.type === 'quest') {
-    const q = QUEST_BY_RANK[state.rank];
-    const questExercises = [
-      {name:'Push-ups',  reps:q.reps},
-      {name:'Sit-ups',   reps:q.reps},
-      {name:'Squats',    reps:q.reps},
-      {name:'Lunges',    reps:q.reps},
-    ];
-    el.innerHTML = `<div class="session-card">
-      <div class="session-type" style="color:var(--rank-d)">DAILY QUEST</div>
-      <div class="session-name">${RANKS[state.rank]}-Rank Quest</div>
-      <div class="exercise-list">
-        ${questExercises.map(ex=>`<div class="ex-list-row"><span class="ex-name">${ex.name}</span><span class="ex-sets" style="color:var(--rank-d)">${ex.reps} reps</span></div>`).join('')}
-      </div>
-      ${state.questDoneToday
-        ? '<div style="margin-top:10px;font-size:11px;color:var(--rank-d);font-weight:700;letter-spacing:1px">✓ COMPLETED TODAY</div>'
-        : `<button class="btn btn-sm btn-green" style="margin-top:10px" data-a="doQuest">COMPLETE QUEST (+${questXP()} XP)</button>`}
+      ${done ? '<div style="margin-top:10px;font-size:11px;font-weight:700;letter-spacing:2px;color:var(--rank-d)">✓ PASS AVSLUTAT</div>' + _extraPassBtn()
+             : '<div style="margin-top:10px"><button class="btn btn-sm" style="width:100%" data-a="goLogMixed">LOG MIXED/OTHER</button></div>'}
     </div>`;
   } else if(sched.type === 'gym') {
-    const cw = state.customWorkouts;
-    let wName, exList;
-    if(cw && cw[sched.workoutIdx]) {
-      wName = cw[sched.workoutIdx].name;
-      exList = cw[sched.workoutIdx].exercises.map(e=>({name:e.name, sets:e.sets, reps:e.reps}));
-    } else {
-      const w = BRO_SPLIT[sched.workoutIdx] || BRO_SPLIT[0];
-      wName = w.name;
-      exList = w.exerciseList;
-    }
-    const exListHtml = exList.map(ex=>
+    const wk = sched.workout || {name:'Workout', exercises:[]};
+    const exListHtml = wk.exercises.map(ex=>
       `<div class="ex-list-row"><span class="ex-name">${ex.name}</span><span class="ex-sets">${ex.sets}×${ex.reps}</span></div>`
     ).join('');
-    const _wIdx = sched.workoutIdx ?? 0;
+    const sessionDoneToday = done || (activeSession && activeSession.date === todayISO() && activeSession.completed);
     el.innerHTML = `<div class="session-card">
       <div class="session-type">GYM SESSION</div>
-      <div class="session-name">${wName}</div>
+      <div class="session-name">${wk.name}</div>
       <div class="exercise-list">${exListHtml}</div>
-      <div style="margin-top:10px">${sessionStartBtnHtml(_wIdx, 'width:100%')}</div>
+      <div style="margin-top:10px">${sessionStartBtnHtml('s' + idx, 'width:100%')}</div>
       ${(!activeSession || activeSession.date !== todayISO() || !activeSession.completed)
         ? `<div style="margin-top:6px;text-align:center"><button class="btn btn-sm" style="opacity:.55;font-size:10px" data-a="logGymQuick">LOG SESSION (+${gymXP()} XP)</button></div>`
         : ''}
+      ${sessionDoneToday ? _extraPassBtn() : ''}
     </div>`;
   }
 }
@@ -3095,57 +3271,44 @@ function renderDailyQuest() {
 function renderPlan() {
   const grid = document.getElementById('week-grid');
   if(!grid) return;
-  const today = new Date().getDay();
-  const todayMap = [6,0,1,2,3,4,5];
-  const todayIdx = todayMap[today];
+  const slots = weekSlots();
+  const todayIdx = todaySlotIdx();
+  const st = getWeeklyStatus();
+  const title = document.getElementById('week-title');
+  if(title) title.textContent = 'THIS WEEK · ' + st.done + ' / ' + st.required + ' SESSIONS';
 
-  // Map schedule index → gymDays index (for editor)
-  let gymDayCounter = 0;
-  const gymDayIdxOf = {};
-  state.schedule.forEach(function(d,i){ if(d.type==='gym'){ gymDayIdxOf[i]=gymDayCounter++; }});
-
-  grid.innerHTML = state.schedule.map(function(d, i) {
+  grid.innerHTML = slots.map(function(d, i) {
     const isToday = i === todayIdx;
-    const isSelected = configMode && swapSelected === i;
-    const typeClass = d.type==='gym'?'gym-day':d.type==='quest'?'quest-day':d.type==='cardio'?'cardio-day':d.type==='mixed'?'mixed-day':'rest-day';
-    const tagHtml  = d.type==='gym'?'<span class="day-tag tag-gym">GYM</span>':d.type==='quest'?'<span class="day-tag tag-quest">QUEST</span>':d.type==='cardio'?'<span class="day-tag tag-cardio">CARDIO</span>':d.type==='mixed'?'<span class="day-tag tag-mixed">MIXED</span>':'<span class="day-tag tag-rest">REST</span>';
+    const isSelected = swapSelected === i;
+    const typeClass = d.type==='gym'?'gym-day':d.type==='cardio'?'cardio-day':d.type==='mixed'?'mixed-day':'rest-day';
+    const tagHtml  = d.type==='gym'?'<span class="day-tag tag-gym">GYM</span>':d.type==='cardio'?'<span class="day-tag tag-cardio">CARDIO</span>':d.type==='mixed'?'<span class="day-tag tag-mixed">MIXED</span>':'<span class="day-tag tag-rest">REST</span>';
 
-    let title='Rest Day', exercises='';
-    if(d.type==='gym' && d.workoutIdx!==null) {
-      const cw=state.customWorkouts;
-      if(cw && cw[d.workoutIdx]){ title=cw[d.workoutIdx].name; exercises=cw[d.workoutIdx].exercises.slice(0,3).map(function(e){return e.name;}).join(', ')+'...'; }
-      else { const w=BRO_SPLIT[d.workoutIdx]; title=w?w.name:'Workout'; exercises=w?w.exerciseList.slice(0,3).map(function(e){return e.name;}).join(', ')+'...':''; }
-    } else if(d.type==='quest') {
-      const q=QUEST_BY_RANK[state.rank]; title='Daily Quest'; exercises=q.reps+'× push-ups, sit-ups, squats, lunges';
+    let title2='Rest Day', exercises='';
+    if(d.type==='gym' && d.workout) {
+      title2 = d.workout.name;
+      exercises = d.workout.exercises.slice(0,3).map(function(e){return e.name;}).join(', ')+'...';
     } else if(d.type==='cardio') {
-      title='Cardio'; exercises='Löpning eller cykel, 25–30 min';
+      title2='Cardio'; exercises='Löpning eller cykel, 25–30 min';
     } else if(d.type==='mixed') {
-      title='Mixed/Other'; exercises='Sport, hike, circuit — anything non-gym/cardio';
+      title2='Mixed/Other'; exercises='Sport, hike, circuit — anything non-gym/cardio';
     }
 
-    // In configure mode: swap on card click + ✏️ for gym days
-    const action = configMode ? 'planDay_'+i : 'dayDetail_'+i;
-    const editBtn = (configMode && d.type==='gym') ? '<button class="edit-day-btn" data-a="editDay_'+gymDayIdxOf[i]+'">✏️</button>' : '';
+    const action = swapSelected !== null ? 'planDay_'+i : 'dayDetail_'+i;
+    const btns = d.type === 'rest'
+      ? '<button class="edit-day-btn" data-a="weekAdd_'+i+'" title="Add session">[ + ]</button>'
+      : '<button class="edit-day-btn" data-a="weekMove_'+i+'" title="Move">⇄</button><button class="edit-day-btn" style="margin-left:0" data-a="weekRemove_'+i+'" title="Remove">✕</button>';
 
     return '<div class="day-card '+typeClass+(isToday?' today':'')+(isSelected?' selected':'')+'" data-a="'+action+'">'+
-      '<div class="day-name">'+d.day+(isToday?' <span style="color:var(--accent);font-size:9px">●</span>':'')+'</div>'+
+      '<div class="day-name">'+WS_DAYS[i]+(isToday?' <span style="color:var(--accent);font-size:9px">●</span>':'')+'</div>'+
       tagHtml+
-      '<div class="day-title">'+title+'</div>'+
+      '<div class="day-title">'+title2+'</div>'+
       '<div class="day-exercises" style="flex:2">'+exercises+'</div>'+
-      editBtn+
+      btns+
     '</div>';
   }).join('');
 
-  // Swap hint only in configure mode
   const hint = document.getElementById('swap-hint');
-  if(hint) hint.style.display = (configMode && swapSelected!==null) ? 'block' : 'none';
-
-  // Button label
-  const btnConfig = document.getElementById('btn-config');
-  if(btnConfig) btnConfig.textContent = configMode ? 'DONE' : 'CONFIGURE';
-
-  // Close detail panel when switching modes
-  if(configMode){ const dp=document.getElementById('day-detail-panel'); if(dp) dp.style.display='none'; }
+  if(hint) hint.style.display = (swapSelected!==null) ? 'block' : 'none';
 
   renderTrainNutrition();
 }
@@ -3415,10 +3578,11 @@ function progressStat(type) {
   }
 }
 
-function doLogGym(sessionIdx, dateStr) {
+function doLogGym(sessionIdx, dateStr, nameOverride) {
   const xp = gymXP();
-  const wName = BRO_SPLIT[sessionIdx]?.name || 'Gym Session';
+  const wName = nameOverride || BRO_SPLIT[sessionIdx]?.name || 'Gym Session';
   state.weeklyGym++;
+  recordSession('gym', dateStr);
   progressStat('gym');
   registerTrainingDay();
   addXPAndLog(xp, 'gym', wName, dateStr || todayISO());
@@ -3430,6 +3594,7 @@ function doLogCardio(km, dateStr) {
   if(!km || km <= 0) { showToast('Enter a distance'); return; }
   let xp = cardioXP(km);
   state.weeklyCardio++;
+  recordSession('cardio', dateStr);
   progressStat('cardio');
   registerTrainingDay();
   // Passive: relentless — streak XP bonus (20 per streak week, max +100)
@@ -3445,6 +3610,7 @@ function doLogCardio(km, dateStr) {
 function doLogMixed(dateStr) {
   const xp = mixedXP();
   state.weeklyMixed = (state.weeklyMixed||0) + 1;
+  recordSession('mixed', dateStr);
   progressStat('mixed');
   registerTrainingDay(); // counts toward the Streak Damage skill, same as gym/cardio
   addXPAndLog(xp, 'mixed', 'Mixed/Other session', dateStr || todayISO());
@@ -3509,18 +3675,30 @@ function toggleNutri(key) {
   renderStatus();
 }
 
+// SIMULATE WEEK END (Demo Tools): evaluates the current week plan exactly like
+// a real Monday rollover would, then starts a fresh plan for the same week.
 function simulateWeekEnd() {
-  // Mark this ISO week as processed so the automatic weekly-boundary check
-  // (checkWeeklyReset) doesn't re-trigger this same week, regardless of
-  // whether this run came from that check or the SIM WEEK END demo button.
-  state.lastWeekKey = _isoWeekKey(new Date());
+  if(!state.weekPlan) ensureLocalSchedule();
+  evaluateWeek(state.weekPlan);
+  const fresh = newWeekPlan(state.weekPlan.week_start, state.scheduleTemplate);
+  state.weekPlan = fresh;
+  saveState();
+  const pid = activeProfileId();
+  if(pid) supa.from('notification_state').update({week_plan:fresh}).eq('profile_id', pid).then(function(){}).catch(function(){});
+  renderAll();
+}
 
-  // STR/AGI/VIT update via rolling counters — not here
-  // DIS (balance patch, simplified): 4 training sessions this week, any mix
-  // of gym/cardio/mixed, = +1 DIS. Replaces the old schedule-percentage math.
-  const totalDone = state.weeklyGym + state.weeklyCardio + (state.weeklyMixed||0);
-  const perfectWeek = totalDone >= 4;
-  let disGain = perfectWeek ? 1 : 0;
+// Week-end evaluation for one finished week plan (real rollover + demo).
+function evaluateWeek(plan) {
+  // STR/AGI/VIT update via rolling counters — not here.
+  // DIS: sessions done (any day, any of gym/cardio/mixed) against the week's
+  // required_sessions snapshot. 100% = +2, >=80% = +1. Extras beyond required
+  // cap at 100%.
+  const required = plan.required_sessions || 0;
+  const totalDone = (plan.done || []).length;
+  const ratio = required > 0 ? Math.min(totalDone, required) / required : 0;
+  const perfectWeek = required > 0 && totalDone >= required;
+  let disGain = ratio >= 1 ? 2 : (ratio >= 0.8 ? 1 : 0);
 
   // --- PASSIVE: unyielding / unbreakable — extra DIS on perfect week ---
   if(perfectWeek && hasPassive('unyielding'))   disGain++;
@@ -3540,7 +3718,7 @@ function simulateWeekEnd() {
   }
 
   // --- PASSIVE: shadow_strike — +200 XP if perfect gym week ---
-  if(hasPassive('shadow_strike') && state.weeklyGym >= state.daysPerWeek) addXP(200);
+  if(hasPassive('shadow_strike') && required > 0 && state.weeklyGym >= required) addXP(200);
 
   // --- PASSIVE: relentless_grind — +100 XP if gym+cardio+quest all done ---
   if(hasPassive('relentless_grind') && state.weeklyGym >= 1 && state.weeklyCardio >= 1 && state.weeklyQuestDone) addXP(100);
@@ -3591,12 +3769,22 @@ function simulateWeekEnd() {
   // type-blind, not the accounting of which type was missed).
   if(BOSS_DAMAGE_ENABLED && state.gate && state.gate.active) {
     const g = state.gate;
-    const schedGym    = state.schedule.filter(function(d){return d.type==='gym';}).length;
-    const schedCardio = state.schedule.filter(function(d){return d.type==='cardio';}).length;
-    const schedMixed  = state.schedule.filter(function(d){return d.type==='mixed';}).length;
-    const missedGym    = Math.max(0, schedGym - state.weeklyGym);
-    const missedCardio = Math.max(0, schedCardio - state.weeklyCardio);
-    const missedMixed  = Math.max(0, schedMixed - (state.weeklyMixed||0));
+    // Damage count = remaining sessions (any type counts toward done). The
+    // per-type split below only decides which item curses apply: planned-minus-
+    // done per type, trimmed so the total never exceeds `remaining`.
+    const remaining = Math.max(0, required - totalDone);
+    const cnt = function(arr, t){ return arr.filter(function(x){ return x.type === t; }).length; };
+    const missedList = [];
+    ['gym','cardio','mixed'].forEach(function(t){
+      const def = Math.max(0, cnt(plan.slots || [], t) - cnt(plan.done || [], t));
+      for(let k = 0; k < def; k++) missedList.push(t);
+    });
+    missedList.length = Math.min(missedList.length, remaining);
+    while(missedList.length < remaining) missedList.push('other');
+    const missedGym    = cnt(missedList.map(function(t){return {type:t};}), 'gym');
+    const missedCardio = cnt(missedList.map(function(t){return {type:t};}), 'cardio');
+    const missedMixed  = cnt(missedList.map(function(t){return {type:t};}), 'mixed');
+    const missedOther  = cnt(missedList.map(function(t){return {type:t};}), 'other');
     const missedBase = BASE_BOSS_MISSED[g.type] || BASE_BOSS_MISSED.normal;
     const bossCritMults = {normal:1.5, high:2.0, red:2.5};
     // "Very bad week" (boss crits on missed-session damage): nothing logged at all.
@@ -3629,6 +3817,9 @@ function simulateWeekEnd() {
     }
     for(let i = 0; i < missedMixed; i++) {
       dealPlayerDamage(missedDmg, 'Missed mixed/other' + (bossCrit ? ' (BOSS CRIT!)' : ''));
+    }
+    for(let i = 0; i < missedOther; i++) {
+      dealPlayerDamage(missedDmg, 'Missed session' + (bossCrit ? ' (BOSS CRIT!)' : ''));
     }
     // pact_of_ruin curse: if <5 nutrition days → HP penalty
     if(hasPassive('pact_of_ruin') && state.weeklyNutritionDays < 5 && state.gate && state.gate.active) {
@@ -3703,30 +3894,114 @@ function confirmRankUp() {
 }
 
 // ============================================================
-//  PLAN / SWAP (only active in configure mode)
+//  THIS WEEK EDITING (week_plan only — never touches the template or the
+//  week's required_sessions)
 // ============================================================
+function _commitWeekPlan() { saveState(); pushWeekPlanSoon(); renderPlan(); renderHome(); }
+
 function handlePlanDay(i) {
-  if(!configMode) return; // swapping disabled outside configure mode
-  if(swapSelected === null) {
-    swapSelected = i; renderPlan();
-  } else if(swapSelected === i) {
-    swapSelected = null; renderPlan();
-  } else {
-    // Bugfix: swap only the CONTENT (type + workoutIdx), never `day` — the
-    // weekday label is fixed to its array position, only what's scheduled
-    // there should move.
-    const a = state.schedule[swapSelected], b = state.schedule[i];
-    const aType = a.type, aIdx = a.workoutIdx;
-    a.type = b.type; a.workoutIdx = b.workoutIdx;
-    b.type = aType; b.workoutIdx = aIdx;
-    swapSelected = null;
-    saveState(); renderPlan();
-    showToast('Days swapped');
-  }
+  if(swapSelected === null) return;
+  if(swapSelected === i) { swapSelected = null; renderPlan(); return; }
+  // Only the CONTENT (type + workout) moves; the weekday label stays on its position.
+  const slots = weekSlots();
+  const a = slots[swapSelected], b = slots[i];
+  const t = {type:a.type, workout:a.workout};
+  a.type = b.type; a.workout = b.workout;
+  b.type = t.type; b.workout = t.workout;
+  swapSelected = null;
+  _commitWeekPlan();
+  showToast('Days swapped');
+}
+function weekMove(i) {
+  if(swapSelected !== null && swapSelected !== i) { handlePlanDay(i); return; }
+  swapSelected = (swapSelected === i) ? null : i; renderPlan();
+}
+function weekRemove(i) {
+  if(!confirm('Ta bort passet från veckan? Veckans krav (' + getWeeklyStatus().required + ' pass) ändras inte.')) return;
+  const s = weekSlots()[i];
+  s.type = 'rest'; s.workout = null;
+  _commitWeekPlan();
 }
 
-function openConfigProgram()  { configMode=true;  swapSelected=null; renderPlan(); }
-function closeConfigProgram() { configMode=false; swapSelected=null; renderPlan(); }
+// Picker: choose a template workout / Cardio / Mixed for a day of this week.
+// startNow=true is the Home "EXTRA PASS" flow (also starts it).
+let _pickerDay = null, _pickerStart = false;
+function templateWorkouts() {
+  const seen = {}, out = [];
+  (state.scheduleTemplate || []).forEach(function(s){
+    if(s.type === 'gym' && s.workout && !seen[s.workout.name]) { seen[s.workout.name] = 1; out.push(s.workout); }
+  });
+  return out;
+}
+function openPicker(dayIdx, startNow) {
+  _pickerDay = dayIdx; _pickerStart = !!startNow;
+  const tw = templateWorkouts();
+  document.getElementById('picker-list').innerHTML =
+    tw.map(function(w, k){ return '<button class="btn" style="width:100%;margin-bottom:8px" data-a="pick_g'+k+'">💪 '+esc(w.name)+'</button>'; }).join('') +
+    '<button class="btn" style="width:100%;margin-bottom:8px" data-a="pick_cardio">🏃 CARDIO</button>' +
+    '<button class="btn" style="width:100%;margin-bottom:8px" data-a="pick_mixed">🔀 MIXED / OTHER</button>';
+  document.getElementById('picker-modal').classList.add('show');
+}
+function closePicker() { document.getElementById('picker-modal').classList.remove('show'); }
+function pickSession(kind) {
+  closePicker();
+  const slot = weekSlots()[_pickerDay];
+  if(!slot) return;
+  let workout = null, type = kind;
+  if(kind.charAt(0) === 'g') { type = 'gym'; workout = _cloneJSON(templateWorkouts()[parseInt(kind.slice(1))]); }
+  // Day already holds a session (extra pass after finishing today's): keep the slot, just start.
+  if(slot.type === 'rest') { slot.type = type; slot.workout = workout; _commitWeekPlan(); }
+  if(!_pickerStart) return;
+  if(type === 'gym') startSessionWorkout(workout);
+  else { switchTab('train'); state.logType = type; renderPlan(); renderLog(); }
+}
+
+// ---- BASE SCHEDULE modal (template; applies from next Monday) ----
+let baseDraft = null, baseSwap = null, editingSlotIdx = null;
+function openBase() {
+  baseDraft = _cloneJSON(state.scheduleTemplate); baseSwap = null;
+  renderBase();
+  document.getElementById('base-modal').classList.add('show');
+}
+function closeBase() { document.getElementById('base-modal').classList.remove('show'); baseDraft = null; }
+function renderBase() {
+  document.getElementById('base-list').innerHTML = baseDraft.map(function(d, i){
+    const sel = ['rest','gym','cardio','mixed'].map(function(t){ return '<option value="'+t+'"'+(d.type===t?' selected':'')+'>'+t.toUpperCase()+'</option>'; }).join('');
+    return '<div class="day-card'+(baseSwap===i?' selected':'')+'" style="margin-bottom:6px">' +
+      '<div class="day-name">'+WS_DAYS[i]+'</div>' +
+      '<select class="form-input base-type-sel" data-i="'+i+'" style="width:92px">'+sel+'</select>' +
+      '<div class="day-title" style="flex:1">'+(d.type==='gym'&&d.workout?esc(d.workout.name):'')+'</div>' +
+      (d.type==='gym' ? '<button class="edit-day-btn" style="margin-left:0" data-a="baseEdit_'+i+'">✏️</button>' : '') +
+      '<button class="edit-day-btn" style="margin-left:0" data-a="baseMove_'+i+'">⇄</button>' +
+    '</div>';
+  }).join('');
+  document.getElementById('base-count').textContent = slotCount(baseDraft) + ' sessions / week';
+}
+function baseMove(i) {
+  if(baseSwap === null) baseSwap = i;
+  else if(baseSwap === i) baseSwap = null;
+  else {
+    const a = baseDraft[baseSwap], b = baseDraft[i];
+    const t = {type:a.type, workout:a.workout};
+    a.type = b.type; a.workout = b.workout; b.type = t.type; b.workout = t.workout;
+    baseSwap = null;
+  }
+  renderBase();
+}
+function baseSetType(i, type) {
+  const d = baseDraft[i];
+  d.type = type;
+  if(type === 'gym' && !d.workout) d.workout = {name:'Workout', exercises:[{name:'', sets:'3', reps:'10'}]};
+  if(type !== 'gym') d.workout = null;
+  renderBase();
+}
+function saveBase() {
+  state.scheduleTemplate = baseDraft;
+  state.daysPerWeek = slotCount(baseDraft);
+  saveState(); pushTemplate();
+  closeBase();
+  showToast('Base schedule saved — applies from next Monday');
+}
 
 // ============================================================
 //  DAY DETAIL PANEL (normal mode)
@@ -3742,9 +4017,9 @@ function showDayDetail(i) {
   }
   panel.dataset.openIdx = String(i);
 
-  const d = state.schedule[i];
+  const d = weekSlots()[i];
   let html = '<div style="font-size:10px;font-weight:700;letter-spacing:2px;color:var(--dim);margin-bottom:10px">'
-    + d.day + ' — ';
+    + WS_DAYS[i] + ' — ';
 
   if(d.type==='rest') {
     html += 'REST DAY</div><div style="font-family:\'Barlow Condensed\',sans-serif;font-size:14px;color:var(--dim)">Recovery day. Focus on sleep, mobility, and nutrition.</div>';
@@ -3754,27 +4029,15 @@ function showDayDetail(i) {
   } else if(d.type==='mixed') {
     html += 'MIXED/OTHER</div><div style="font-family:\'Barlow Condensed\',sans-serif;font-size:14px;color:var(--dim);margin-bottom:12px">Sport, hike, circuit training — anything that isn\'t clearly gym or cardio.</div>' +
       '<button class="btn btn-sm" data-a="goLogMixed">LOG MIXED/OTHER</button>';
-  } else if(d.type==='quest') {
-    const q = QUEST_BY_RANK[state.rank];
-    html += 'DAILY QUEST</div><div class="exercise-list">';
-    ['Push-ups','Sit-ups','Squats','Lunges'].forEach(function(name){
-      html += '<div class="ex-list-row"><span class="ex-name">'+name+'</span><span class="ex-sets" style="color:var(--rank-d)">'+q.reps+' reps</span></div>';
-    });
-    html += '</div>';
   } else if(d.type==='gym') {
-    const cw = state.customWorkouts;
-    let wName, exList;
-    if(cw && cw[d.workoutIdx]){ wName=cw[d.workoutIdx].name; exList=cw[d.workoutIdx].exercises; }
-    else { const w=BRO_SPLIT[d.workoutIdx]||BRO_SPLIT[0]; wName=w.name; exList=w.exerciseList; }
+    const wName = d.workout.name, exList = d.workout.exercises;
     html += wName+'</div><div class="exercise-list">';
     exList.forEach(function(ex){
       html += '<div class="ex-list-row"><span class="ex-name">'+ex.name+'</span><span class="ex-sets">'+ex.sets+'×'+ex.reps+'</span></div>';
     });
     html += '</div>';
-    const _todayMap = [6,0,1,2,3,4,5];
-    const _todayIdx = _todayMap[new Date().getDay()];
-    if(i === _todayIdx) {
-      html += '<div style="margin-top:12px">' + sessionStartBtnHtml(d.workoutIdx, 'width:100%') + '</div>';
+    if(i === todaySlotIdx()) {
+      html += '<div style="margin-top:12px">' + sessionStartBtnHtml('s'+i, 'width:100%') + '</div>';
     }
   }
 
@@ -3785,20 +4048,9 @@ function showDayDetail(i) {
 // ============================================================
 //  WORKOUT EDITOR (configure mode)
 // ============================================================
-let editingGymDayIdx = null;
-
-function openWorkoutEditor(gymDayIdx) {
-  editingGymDayIdx = gymDayIdx;
-  const gymDays = state.schedule.filter(function(d){return d.type==='gym';});
-  const d = gymDays[gymDayIdx];
-  const cw = state.customWorkouts;
-  let workout;
-  if(cw && cw[gymDayIdx]) {
-    workout = cw[gymDayIdx];
-  } else {
-    const w = BRO_SPLIT[d && d.workoutIdx != null ? d.workoutIdx : 0] || BRO_SPLIT[0];
-    workout = { name: w.name, exercises: w.exerciseList.map(function(e){return {name:e.name,sets:String(e.sets),reps:String(e.reps)};}) };
-  }
+function openWorkoutEditor(slotIdx) {
+  editingSlotIdx = slotIdx;
+  const workout = baseDraft[slotIdx].workout;
   document.getElementById('we-name').value = workout.name;
   const container = document.getElementById('we-exercises');
   container.innerHTML = '';
@@ -3825,30 +4077,18 @@ function addEditorExercise() {
 }
 
 function saveWorkoutEditor() {
-  if(editingGymDayIdx === null) return;
+  if(editingSlotIdx === null || !baseDraft) return;
   const name = document.getElementById('we-name').value.trim() || 'Workout';
   const exercises = [];
   document.getElementById('we-exercises').querySelectorAll('.we-row').forEach(function(row){
-    exercises.push({
-      name: row.querySelector('.we-ex-name').value,
-      sets: row.querySelector('.we-ex-sets').value,
-      reps: row.querySelector('.we-ex-reps').value,
-    });
+    const n = row.querySelector('.we-ex-name').value;
+    if(!n.trim()) return;
+    exercises.push({name:n, sets:row.querySelector('.we-ex-sets').value, reps:row.querySelector('.we-ex-reps').value});
   });
-  if(!state.customWorkouts) {
-    const gymDays = state.schedule.filter(function(d){return d.type==='gym';});
-    state.customWorkouts = gymDays.map(function(d,i){
-      if(i===editingGymDayIdx) return {name,exercises};
-      const w = BRO_SPLIT[d.workoutIdx]||BRO_SPLIT[0];
-      return {name:w.name, exercises:w.exerciseList.map(function(e){return {name:e.name,sets:String(e.sets),reps:String(e.reps)};})};
-    });
-  } else {
-    state.customWorkouts[editingGymDayIdx] = {name, exercises};
-  }
+  baseDraft[editingSlotIdx].workout = {name, exercises};
   document.getElementById('workout-editor-modal').classList.remove('show');
-  editingGymDayIdx = null;
-  saveState(); renderPlan(); renderHome();
-  showToast('Workout saved');
+  editingSlotIdx = null;
+  renderBase();
 }
 
 // ============================================================
@@ -3897,7 +4137,8 @@ function openSettings() {
   document.getElementById('set-age').value = state.age;
   document.getElementById('set-weight').value = state.weight;
   document.getElementById('set-height').value = state.height;
-  document.getElementById('set-days').value = state.daysPerWeek;
+  document.getElementById('set-days').value = slotCount(state.scheduleTemplate);
+  document.getElementById('set-days').disabled = true; // derived from the base schedule
   document.getElementById('set-goal').value = state.goal;
   document.getElementById('set-split').value = state.split;
   document.getElementById('settings-modal').classList.add('show');
@@ -3909,7 +4150,6 @@ function saveSettings() {
   state.age = parseInt(document.getElementById('set-age').value) || state.age;
   state.weight = parseFloat(document.getElementById('set-weight').value) || state.weight;
   state.height = parseFloat(document.getElementById('set-height').value) || state.height;
-  state.daysPerWeek = parseInt(document.getElementById('set-days').value) || state.daysPerWeek;
   state.goal = document.getElementById('set-goal').value;
   state.split = document.getElementById('set-split').value;
   saveState();
@@ -3954,6 +4194,10 @@ function todayISO() {
 // ============================================================
 //  EVENT DELEGATION
 // ============================================================
+document.addEventListener('change', function(e) {
+  const el = e.target.closest('.base-type-sel');
+  if(el && baseDraft) baseSetType(parseInt(el.getAttribute('data-i')), el.value);
+});
 document.addEventListener('click', function(e) {
   const el = e.target.closest('[data-a]');
   if(!el) return;
@@ -3996,10 +4240,8 @@ document.addEventListener('click', function(e) {
   else if(a === 'doQuest')     doLogQuest(todayISO());
   else if(a === 'logGymQuick') {
     // Find today's gym workout index
-    const dayIdx = new Date().getDay();
-    const map = [6,0,1,2,3,4,5];
-    const sched = state.schedule[map[dayIdx]];
-    doLogGym(sched?.workoutIdx ?? 0, todayISO());
+    const sched = weekSlots()[todaySlotIdx()];
+    doLogGym(0, todayISO(), sched && sched.workout ? sched.workout.name : undefined);
   }
 
   else if(a === 'logtype_gym')   { state.logType = 'gym';   renderLog(); }
@@ -4026,10 +4268,17 @@ document.addEventListener('click', function(e) {
     doLogQuest(date);
   }
 
-  else if(a === 'configProgram') {
-    if(configMode) closeConfigProgram();
-    else openConfigProgram();
-  }
+  else if(a === 'openBase')   openBase();
+  else if(a === 'baseSave')   saveBase();
+  else if(a === 'baseClose')  closeBase();
+  else if(a === 'extraPass')  openPicker(todaySlotIdx(), true);
+  else if(a === 'pickerClose') closePicker();
+  else if(a.startsWith('pick_')) pickSession(a.slice(5));
+  else if(a.startsWith('weekAdd_'))    { openPicker(parseInt(a.split('_')[1]), false); }
+  else if(a.startsWith('weekMove_'))   weekMove(parseInt(a.split('_')[1]));
+  else if(a.startsWith('weekRemove_')) weekRemove(parseInt(a.split('_')[1]));
+  else if(a.startsWith('baseMove_'))   baseMove(parseInt(a.split('_')[1]));
+  else if(a.startsWith('baseEdit_'))   openWorkoutEditor(parseInt(a.split('_')[1]));
 
   else if(a.startsWith('planDay_')) {
     const i = parseInt(a.split('_')[1]);
@@ -4038,10 +4287,6 @@ document.addEventListener('click', function(e) {
   else if(a.startsWith('dayDetail_')) {
     const i = parseInt(a.split('_')[1]);
     showDayDetail(i);
-  }
-  else if(a.startsWith('editDay_')) {
-    const gymIdx = parseInt(a.split('_')[1]);
-    openWorkoutEditor(gymIdx);
   }
 
   // Workout editor
@@ -4141,20 +4386,22 @@ document.addEventListener('click', function(e) {
   else if(a === 'demo_gym') {
     const xp = gymXP();
     state.weeklyGym++;
+    recordSession('gym', todayISO());
     progressStat('gym');
     registerTrainingDay();
     addXPAndLog(xp, 'gym', 'Demo Gym Session', todayISO());
     _applyGateDmg('gym', 'Gym session');
-    showToast(`+${xp} XP — Gym (${state.weeklyGym}/${state.daysPerWeek}) — 🔥${state.currentStreakDays}d streak`);
+    showToast(`+${xp} XP — Gym (${getWeeklyStatus().done}/${getWeeklyStatus().required}) — 🔥${state.currentStreakDays}d streak`);
   }
   else if(a === 'demo_cardio') {
     const xp = cardioXP(5);
     state.weeklyCardio++;
+    recordSession('cardio', todayISO());
     progressStat('cardio');
     registerTrainingDay();
     addXPAndLog(xp, 'cardio', 'Demo 5km run', todayISO());
     _applyGateDmg('cardio', 'Cardio 5km');
-    showToast(`+${xp} XP — Cardio (${state.weeklyCardio}/3) — 🔥${state.currentStreakDays}d streak`);
+    showToast(`+${xp} XP — Cardio (${getWeeklyStatus().done}/${getWeeklyStatus().required}) — 🔥${state.currentStreakDays}d streak`);
   }
   else if(a === 'demo_week')      simulateWeekEnd();
   else if(a === 'demo_startGate') { startGate('normal', 500); switchTab('gates'); }
@@ -4171,7 +4418,7 @@ document.addEventListener('click', function(e) {
   else if(a === 'openSessionModal')  openSessionModal();
   else if(a === 'finishSession')     finishSession();
   else if(a === 'toggleWarmup')      toggleWarmup();
-  else if(a.startsWith('startSession_')) { const wi=parseInt(a.split('_')[1]); startSession(wi); }
+  else if(a.startsWith('startSession_')) startSession(a.slice('startSession_'.length));
   else if(a.startsWith('toggleExCard_')) { toggleExCard(decodeURIComponent(a.replace('toggleExCard_',''))); }
   else if(a.startsWith('checkExCard_'))  { e.stopPropagation(); checkExCard(decodeURIComponent(a.replace('checkExCard_',''))); }
 
@@ -4352,25 +4599,24 @@ function saveActiveSession() {
 }
 
 function getTodayGymSched() {
-  const dayIdx = new Date().getDay();
-  const map = [6,0,1,2,3,4,5];
-  const sched = state.schedule[map[dayIdx]];
+  const sched = weekSlots()[todaySlotIdx()];
   return (sched && sched.type === 'gym') ? sched : null;
 }
 
+// Legacy fallback for a session that was persisted before workouts were embedded.
 function getWorkoutForIdx(workoutIdx) {
-  const cw = state.customWorkouts;
-  if(cw && cw[workoutIdx]) return {name:cw[workoutIdx].name, exercises:cw[workoutIdx].exercises};
-  const w = BRO_SPLIT[workoutIdx] || BRO_SPLIT[0];
-  return {name:w.name, exercises:w.exerciseList};
+  return legacyWorkout(workoutIdx || 0);
 }
 
-function startSession(workoutIdx) {
-  if(activeSession && activeSession.date === todayISO() && !activeSession.completed) {
-    openSessionModal(); return;
-  }
-  const workout = getWorkoutForIdx(workoutIdx);
-  activeSession = {date:todayISO(), workoutIdx:workoutIdx, workoutName:workout.name, warmupDone:false, completedExercises:[], completed:false};
+function startSession(key) { // key: 's<weekSlotIdx>'
+  if(activeSession && activeSession.date === todayISO() && !activeSession.completed) { openSessionModal(); return; }
+  const slot = weekSlots()[parseInt(String(key).slice(1))];
+  startSessionWorkout(slot && slot.workout ? _cloneJSON(slot.workout) : legacyWorkout(0));
+}
+
+function startSessionWorkout(workout) {
+  if(activeSession && activeSession.date === todayISO() && !activeSession.completed) { openSessionModal(); return; }
+  activeSession = {date:todayISO(), workout:workout, workoutName:workout.name, warmupDone:false, completedExercises:[], completed:false};
   saveActiveSession();
   pushActiveSessionNotif(); // T2: fire-and-forget, rör ingen rendering
   openSessionModal();
@@ -4401,8 +4647,7 @@ function finishSession() {
   if(!activeSession) return;
   activeSession.completed = true;
   saveActiveSession();
-  const wIdx = activeSession.workoutIdx ?? 0;
-  doLogGym(wIdx, todayISO());
+  doLogGym(0, todayISO(), activeSession.workoutName);
   closeActiveSessionNotif(); // T2: stänger notisen på alla enheter, fire-and-forget
   document.getElementById('session-modal').classList.remove('show');
   updateSessionPill();
@@ -4435,7 +4680,7 @@ function checkExCard(exName) {
 
 function renderSessionModal() {
   if(!activeSession) return;
-  const workout = getWorkoutForIdx(activeSession.workoutIdx);
+  const workout = activeSession.workout || getWorkoutForIdx(activeSession.workoutIdx);
   const swName = SWE_WORKOUT_NAMES[workout.name] || workout.name.toUpperCase();
   const now = new Date();
   document.getElementById('sm-title').textContent = '⚔ ' + swName + ' — ' + SWE_DAYS_S[now.getDay()] + ' ' + now.getDate() + ' ' + SWE_MONTHS_S[now.getMonth()];
@@ -4647,13 +4892,13 @@ function renderLibrary() {
 }
 
 // ---- helper: today's gym session state string for start button ----
-function sessionStartBtnHtml(workoutIdx, style) {
+function sessionStartBtnHtml(key, style) {
   const st = style || '';
   if(activeSession && activeSession.date === todayISO() && activeSession.completed)
     return '<div style="'+st+';font-size:11px;font-weight:700;letter-spacing:2px;color:var(--rank-d)">✓ PASS AVSLUTAT</div>';
   if(activeSession && activeSession.date === todayISO() && !activeSession.completed)
     return '<button class="btn" style="'+st+'" data-a="openSessionModal">⚔ FORTSÄTT PASS</button>';
-  return '<button class="btn" style="'+st+'" data-a="startSession_'+workoutIdx+'">⚔ STARTA PASS</button>';
+  return '<button class="btn" style="'+st+'" data-a="startSession_'+key+'">⚔ STARTA PASS</button>';
 }
 
 // ============================================================
@@ -4814,8 +5059,8 @@ async function _pushNotifState() {
   if(!pid || !state) return;
   const payload = {
     profile_id: pid,
-    schedule: (state.schedule || []).map(function(d){ return d.type; }),
-    days_per_week: state.daysPerWeek || 0,
+    schedule: weekSlots().map(function(d){ return d.type; }),
+    days_per_week: slotCount(state.scheduleTemplate),
     weekly_gym: state.weeklyGym || 0,
     weekly_cardio: state.weeklyCardio || 0,
     today_date: todayISO(),
@@ -5131,6 +5376,7 @@ async function completeLogin(profile) {
   // Backfill presetKey for profiles created before the preset system existed
   // (e.g. Jonathan) — server-side preset_key is the source of truth here.
   if(!state.presetKey && profile.preset_key) { state.presetKey = profile.preset_key; }
+  await hydrateSchedule(profile.id);
   saveState();
   document.getElementById('profile-gate').classList.add('hidden');
   bootApp();
@@ -5615,6 +5861,7 @@ function bootApp() {
     saveState();
   }
   checkDailyReset();
+  ensureLocalSchedule();
   loadActiveSession();
   renderAll();
   updateSessionPill();
@@ -5631,7 +5878,7 @@ function bootApp() {
   syncLoadActiveGate().then(function(){
     // Runs after gate state is hydrated from the server so missed-session
     // boss damage (if any) uses the real, current gate — not a stale local mirror.
-    checkWeeklyReset();
+    weeklyRollover();
     flushPendingGateOps();
     startPresenceHeartbeat();
   });
